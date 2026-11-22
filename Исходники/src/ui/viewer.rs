@@ -244,7 +244,7 @@ impl Viewer {
         let row2 = Rect::from_min_max(pos2(bar.left() + pad - space::S8, row1.bottom() + space::S8), pos2(bar.right() - pad + space::S8, bar.bottom() - space::S12));
         let mut speed_anchor = None;
         let mut track_anchor = None;
-        let tracks: Vec<String> = pl.info.audio_tracks.iter().map(|t| t.label.clone()).collect();
+        let tracks: Vec<String> = pl.info.audio_tracks.iter().map(|t| t.label()).collect();
         let cur_track = pl.audio_track;
         ui.allocate_new_ui(egui::UiBuilder::new().max_rect(row2), |ui| {
             ui.horizontal_centered(|ui| {
@@ -324,7 +324,7 @@ impl Viewer {
                 SPEEDS.iter().rev().map(|s| if *s == 1.0 { tr!("1× обычная", "1× normal", "1× звичайна").to_string() } else { fmt_speed(*s) }).collect(),
                 SPEEDS.iter().rev().position(|s| (*s - pl.speed).abs() < 1e-3).unwrap_or(usize::MAX),
             ),
-            Menu::Track => (track_anchor, pl.info.audio_tracks.iter().map(|t| t.label.clone()).collect(), pl.audio_track),
+            Menu::Track => (track_anchor, pl.info.audio_tracks.iter().map(|t| t.label()).collect(), pl.audio_track),
         };
         let Some(anchor) = anchor else {
             self.menu = Menu::None;

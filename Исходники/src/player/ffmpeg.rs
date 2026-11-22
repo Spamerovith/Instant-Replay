@@ -90,13 +90,34 @@ pub struct MediaInfo {
 #[allow(dead_code)]
 #[derive(Clone, Debug, Default)]
 pub struct AudioTrack {
-    pub label: String,
+    /// Title or meaningful handler name from the file (may be empty).
+    pub raw: String,
+    /// Language tag from the file (may be empty).
+    pub lang: String,
+    pub index: usize,
     pub codec: String,
     pub channels: u32,
 }
 
-/// Понятное имя дорожки: title → handler_name (если не служебный) → язык → «Дорожка N».
-fn track_label(s: &serde_json::Value, n: usize) -> String {
+impl AudioTrack {
+    /// Name shown to the user, in the current interface language.
+    pub fn label(&self) -> String {
+        match self.raw.to_ascii_lowercase().as_str() {
+            "mix" | "main mix" => return tr!("Общий звук (игра + микрофон)", "Combined (game + mic)", "Спільний звук (гра + мікрофон)").to_string(),
+            "system audio" | "system" | "desktop audio" => return tr!("Звук системы", "System audio", "Звук системи").to_string(),
+            "microphone" | "mic" => return tr!("Микрофон", "Microphone", "Мікрофон").to_string(),
+            "" => {}
+            _ => return self.raw.clone(),
+        }
+        if !self.lang.is_empty() && self.lang != "und" {
+            return trf!(["Дорожка {} · {}", "Track {} · {}", "Доріжка {} · {}"], self.index + 1, self.lang);
+        }
+        trf!(["Дорожка {}", "Track {}", "Доріжка {}"], self.index + 1)
+    }
+}
+
+/// Title → handler_name (when not a generic one) and the language tag.
+fn track_tags(s: &serde_json::Value) -> (String, String) {
     let tags = &s["tags"];
     let get = |k: &str| -> String {
         tags.as_object()
@@ -114,20 +135,7 @@ fn track_label(s: &serde_json::Value, n: usize) -> String {
             name = h;
         }
     }
-    let name = match name.to_ascii_lowercase().as_str() {
-        "mix" | "main mix" => tr!("Общий звук (игра + микрофон)", "Combined (game + mic)", "Спільний звук (гра + мікрофон)").to_string(),
-        "system audio" | "system" | "desktop audio" => tr!("Звук системы", "System audio", "Звук системи").to_string(),
-        "microphone" | "mic" => tr!("Микрофон", "Microphone", "Мікрофон").to_string(),
-        _ => name,
-    };
-    if !name.is_empty() {
-        return name;
-    }
-    let lang = get("language");
-    if !lang.is_empty() && lang != "und" {
-        return trf!(["Дорожка {} · {}", "Track {} · {}", "Доріжка {} · {}"], n + 1, lang);
-    }
-    trf!(["Дорожка {}", "Track {}", "Доріжка {}"], n + 1)
+    (name, get("language"))
 }
 
 fn parse_rate(s: &str) -> f64 {
@@ -218,7 +226,8 @@ pub fn probe(path: &Path) -> Result<MediaInfo, String> {
                     let n = info.audio_tracks.len();
                     let codec = s["codec_name"].as_str().unwrap_or("").to_string();
                     let channels = s["channels"].as_u64().unwrap_or(0) as u32;
-                    info.audio_tracks.push(AudioTrack { label: track_label(s, n), codec: codec.clone(), channels });
+                    let (raw, lang) = track_tags(s);
+                    info.audio_tracks.push(AudioTrack { raw, lang, index: n, codec: codec.clone(), channels });
                     if s["disposition"]["default"].as_i64() == Some(1) && !default_found {
                         info.default_audio = n;
                         default_found = true;
