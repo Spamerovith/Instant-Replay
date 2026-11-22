@@ -1,0 +1,242 @@
+//! Поиск ffmpeg/ffprobe и чтение сведений о медиафайле.
+
+use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
+
+use std::os::windows::process::CommandExt;
+use std::process::Command;
+
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+/// Процесс без консольного окна.
+pub fn hidden_command(program: impl AsRef<std::ffi::OsStr>) -> Command {
+    let mut c = Command::new(program);
+    c.creation_flags(CREATE_NO_WINDOW);
+    c
+}
+
+fn find_tool(name: &str) -> Option<PathBuf> {
+    let exe = format!("{name}.exe");
+    if let Ok(me) = std::env::current_exe() {
+        if let Some(dir) = me.parent() {
+            for c in [dir.join(&exe), dir.join("ffmpeg").join(&exe), dir.join("ffmpeg").join("bin").join(&exe)] {
+                if c.is_file() {
+                    return Some(c);
+                }
+            }
+        }
+    }
+    if let Some(paths) = std::env::var_os("PATH") {
+        for d in std::env::split_paths(&paths) {
+            let c = d.join(&exe);
+            if c.is_file() {
+                return Some(c);
+            }
+        }
+    }
+    if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+        let c = PathBuf::from(local).join("Microsoft").join("WinGet").join("Links").join(&exe);
+        if c.exists() {
+            return Some(c);
+        }
+    }
+    for base in [r"C:\ffmpeg\bin", r"C:\Program Files\ffmpeg\bin", r"C:\ProgramData\chocolatey\bin"] {
+        let c = Path::new(base).join(&exe);
+        if c.is_file() {
+            return Some(c);
+        }
+    }
+    None
+}
+
+pub fn ffmpeg() -> Option<&'static Path> {
+    static P: OnceLock<Option<PathBuf>> = OnceLock::new();
+    P.get_or_init(|| find_tool("ffmpeg")).as_deref()
+}
+
+pub fn ffprobe() -> Option<&'static Path> {
+    static P: OnceLock<Option<PathBuf>> = OnceLock::new();
+    P.get_or_init(|| find_tool("ffprobe")).as_deref()
+}
+
+pub fn missing() -> &'static str {
+    tr!("Для просмотра клипов нужен FFmpeg. Положите ffmpeg.exe и ffprobe.exe рядом с Instant Replay.exe или установите: winget install Gyan.FFmpeg", "Playing clips needs FFmpeg. Put ffmpeg.exe and ffprobe.exe next to Instant Replay.exe or install it: winget install Gyan.FFmpeg", "Для перегляду кліпів потрібен FFmpeg. Покладіть ffmpeg.exe і ffprobe.exe поруч із Instant Replay.exe або встановіть: winget install Gyan.FFmpeg")
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct MediaInfo {
+    pub duration: f64,
+    pub has_video: bool,
+    pub width: u32,
+    pub height: u32,
+    pub fps: f64,
+    pub video_codec: String,
+    pub has_audio: bool,
+    pub audio_codec: String,
+    pub sample_rate: u32,
+    pub channels: u32,
+    pub has_cover: bool,
+    pub bitrate: u64,
+    pub format: String,
+    pub title: String,
+    pub artist: String,
+    pub album: String,
+    /// Все звуковые дорожки файла (порядок = индекс для `-map 0:a:N`).
+    pub audio_tracks: Vec<AudioTrack>,
+    /// Дорожка, которую файл просит играть по умолчанию.
+    pub default_audio: usize,
+}
+
+#[allow(dead_code)]
+#[derive(Clone, Debug, Default)]
+pub struct AudioTrack {
+    pub label: String,
+    pub codec: String,
+    pub channels: u32,
+}
+
+/// Понятное имя дорожки: title → handler_name (если не служебный) → язык → «Дорожка N».
+fn track_label(s: &serde_json::Value, n: usize) -> String {
+    let tags = &s["tags"];
+    let get = |k: &str| -> String {
+        tags.as_object()
+            .and_then(|o| o.iter().find(|(kk, _)| kk.eq_ignore_ascii_case(k)).map(|(_, v)| v.as_str().unwrap_or("").trim().to_string()))
+            .unwrap_or_default()
+    };
+    let generic = |h: &str| {
+        let l = h.to_ascii_lowercase();
+        l.is_empty() || l.contains("soundhandler") || l.contains("sound media handler") || l.contains("core media") || l == "audio" || l.starts_with("isomedia")
+    };
+    let mut name = get("title");
+    if name.is_empty() {
+        let h = get("handler_name");
+        if !generic(&h) {
+            name = h;
+        }
+    }
+    let name = match name.to_ascii_lowercase().as_str() {
+        "mix" | "main mix" => tr!("Общий звук (игра + микрофон)", "Combined (game + mic)", "Спільний звук (гра + мікрофон)").to_string(),
+        "system audio" | "system" | "desktop audio" => tr!("Звук системы", "System audio", "Звук системи").to_string(),
+        "microphone" | "mic" => tr!("Микрофон", "Microphone", "Мікрофон").to_string(),
+        _ => name,
+    };
+    if !name.is_empty() {
+        return name;
+    }
+    let lang = get("language");
+    if !lang.is_empty() && lang != "und" {
+        return trf!(["Дорожка {} · {}", "Track {} · {}", "Доріжка {} · {}"], n + 1, lang);
+    }
+    trf!(["Дорожка {}", "Track {}", "Доріжка {}"], n + 1)
+}
+
+fn parse_rate(s: &str) -> f64 {
+    if let Some((a, b)) = s.split_once('/') {
+        let a: f64 = a.parse().unwrap_or(0.0);
+        let b: f64 = b.parse().unwrap_or(1.0);
+        if b > 0.0 { a / b } else { 0.0 }
+    } else {
+        s.parse().unwrap_or(0.0)
+    }
+}
+
+pub fn probe(path: &Path) -> Result<MediaInfo, String> {
+    let probe = ffprobe().ok_or_else(|| missing().to_string())?;
+    let out = hidden_command(probe)
+        .args(["-v", "error", "-print_format", "json", "-show_format", "-show_streams"])
+        .arg(path)
+        .output()
+        .map_err(|e| e.to_string())?;
+    let v: serde_json::Value =
+        serde_json::from_slice(&out.stdout).map_err(|_| tr!("не удалось прочитать файл", "could not read the file", "не вдалося прочитати файл").to_string())?;
+    let mut info = MediaInfo::default();
+    let fmt = &v["format"];
+    info.duration = fmt["duration"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
+    info.bitrate = fmt["bit_rate"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0);
+    info.format = fmt["format_long_name"].as_str().unwrap_or("").to_string();
+    let tag = |k: &str| -> String {
+        let tags = &fmt["tags"];
+        if let Some(o) = tags.as_object() {
+            for (kk, vv) in o {
+                if kk.eq_ignore_ascii_case(k) {
+                    return vv.as_str().unwrap_or("").to_string();
+                }
+            }
+        }
+        String::new()
+    };
+    info.title = tag("title");
+    info.artist = tag("artist");
+    info.album = tag("album");
+
+    let mut default_found = false;
+    if let Some(streams) = v["streams"].as_array() {
+        for s in streams {
+            match s["codec_type"].as_str() {
+                Some("video") => {
+                    let attached = s["disposition"]["attached_pic"].as_i64() == Some(1);
+                    if attached {
+                        info.has_cover = true;
+                        continue;
+                    }
+                    if info.has_video {
+                        continue;
+                    }
+                    info.has_video = true;
+                    info.width = s["width"].as_u64().unwrap_or(0) as u32;
+                    info.height = s["height"].as_u64().unwrap_or(0) as u32;
+                    info.video_codec = s["codec_name"].as_str().unwrap_or("").to_string();
+                    let mut fps = parse_rate(s["avg_frame_rate"].as_str().unwrap_or("0"));
+                    if !(1.0..=240.0).contains(&fps) {
+                        fps = parse_rate(s["r_frame_rate"].as_str().unwrap_or("0"));
+                    }
+                    if !(1.0..=240.0).contains(&fps) {
+                        fps = 30.0;
+                    }
+                    info.fps = fps;
+                    // Поворот из метаданных (телефоны): ffmpeg поворачивает кадры сам.
+                    let mut rot = 0i64;
+                    if let Some(sd) = s["side_data_list"].as_array() {
+                        for d in sd {
+                            if let Some(r) = d["rotation"].as_i64() {
+                                rot = r;
+                            }
+                        }
+                    }
+                    if let Some(r) = s["tags"]["rotate"].as_str().and_then(|x| x.parse::<i64>().ok()) {
+                        rot = r;
+                    }
+                    if rot.rem_euclid(180) == 90 {
+                        std::mem::swap(&mut info.width, &mut info.height);
+                    }
+                    if info.duration <= 0.0 {
+                        info.duration =
+                            s["duration"].as_str().and_then(|x| x.parse().ok()).unwrap_or(0.0);
+                    }
+                }
+                Some("audio") => {
+                    let n = info.audio_tracks.len();
+                    let codec = s["codec_name"].as_str().unwrap_or("").to_string();
+                    let channels = s["channels"].as_u64().unwrap_or(0) as u32;
+                    info.audio_tracks.push(AudioTrack { label: track_label(s, n), codec: codec.clone(), channels });
+                    if s["disposition"]["default"].as_i64() == Some(1) && !default_found {
+                        info.default_audio = n;
+                        default_found = true;
+                    }
+                    if !info.has_audio {
+                        info.has_audio = true;
+                        info.audio_codec = codec;
+                        info.sample_rate =
+                            s["sample_rate"].as_str().and_then(|x| x.parse().ok()).unwrap_or(0);
+                        info.channels = channels;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    if !info.has_video && !info.has_audio {
+        return Err(tr!("в файле нет видео- или аудиопотоков", "the file has no video or audio streams", "у файлі немає відео- чи аудіопотоків").into());
+    }
+    Ok(info)
+}

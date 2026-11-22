@@ -1,0 +1,5 @@
+/Исходники/target/
+/Исходники/.cargo/
+/Instant Replay/*.exe
+/Instant Replay/*.old
+/Instant Replay/*.download
