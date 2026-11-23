@@ -578,8 +578,10 @@ impl eframe::App for App {
                     ctx.request_repaint_after(Duration::from_millis(150));
                 }
             }
-            if esc && self.quick.is_some() {
-                self.quick = None; // Esc closes the quick view first
+            if esc && self.quick.as_mut().map_or(false, |q| q.close_menu()) {
+                // Esc closes an open speed / track menu first
+            } else if esc && self.quick.is_some() {
+                self.quick = None; // then the quick view
                 self.shared.overlay_panel_rect();
             } else if esc && ov.gallery {
                 ov.gallery = false; // Esc leaves the gallery first, then the overlay
@@ -1153,10 +1155,14 @@ impl App {
                 let auto = crate::config::auto_bitrate_mbps(self.cfg.codec, aw, ah, self.cfg.fps, self.cfg.bitrate_quality);
                 g.row(
                     tr!("Автобитрейт", "Auto bitrate", "Автобітрейт"),
-                    Some(tr!("Подбирается под разрешение, частоту кадров и кодек: файлы легче при той же чёткости", "Matched to resolution, frame rate and codec: lighter files at the same sharpness", "Добирається під роздільність, частоту кадрів і кодек: файли легші за тієї ж чіткості")),
+                    Some(tr!(
+                        "Постоянное качество: спокойные сцены и рабочий стол весят в разы меньше, динамичные - сколько нужно",
+                        "Constant quality: calm scenes and the desktop take a fraction of the size, busy ones what they need",
+                        "Постійна якість: спокійні сцени й робочий стіл важать у рази менше, динамічні - скільки потрібно"
+                    )),
                     |ui| {
                         if self.cfg.auto_bitrate {
-                            w::value_text(ui, &trf!(["{} Мбит/с", "{} Mbps", "{} Мбіт/с"], auto));
+                            w::value_text(ui, &trf!(["обычно до {} Мбит/с", "usually up to {} Mbps", "зазвичай до {} Мбіт/с"], auto));
                         }
                         w::switch(ui, &mut self.cfg.auto_bitrate, tr!("Автобитрейт", "Auto bitrate", "Автобітрейт"));
                     },
@@ -1660,9 +1666,15 @@ fn bitrate_hint(cfg: &Config, out: (u32, u32)) -> String {
 fn estimate_memory(cfg: &Config, out: (u32, u32)) -> String {
     let (pw, ph) = picture_size(cfg, out);
     let rate = if cfg.auto_bitrate { crate::config::auto_bitrate_mbps(cfg.codec, pw, ph, cfg.fps, cfg.bitrate_quality) } else { cfg.bitrate_mbps };
-    let mbps = if cfg.rate_control == RateControl::Cqp { rate.max(40) as f64 } else { rate as f64 * if cfg.rate_control == RateControl::Vbr { 1.1 } else { 1.0 } };
+    let mbps = if cfg.rate_control == RateControl::Cqp {
+        rate.max(40) as f64
+    } else if cfg.auto_bitrate {
+        rate as f64 * 1.3 // constant quality: busy scenes may go above the usual rate
+    } else {
+        rate as f64 * if cfg.rate_control == RateControl::Vbr { 1.1 } else { 1.0 }
+    };
     let bytes = (mbps * 1_000_000.0 / 8.0 + 3.0 * 24_000.0) * cfg.replay_seconds as f64;
-    let prefix = if cfg.rate_control == RateControl::Cqp { tr!("до ≈", "up to ≈", "до ≈") } else { "≈" };
+    let prefix = if cfg.rate_control == RateControl::Cqp || cfg.auto_bitrate { tr!("до ≈", "up to ≈", "до ≈") } else { "≈" };
     trf!(["Займёт {} {} оперативной памяти", "Uses {} {} of RAM", "Займе {} {} оперативної пам'яті"], prefix, util::format_bytes(bytes as u64))
 }
 

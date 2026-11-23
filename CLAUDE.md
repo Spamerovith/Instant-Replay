@@ -111,6 +111,8 @@
 - Юнит-тесты: `cargo test` (в `Исходники/`).
 - Режим `--selftest <папка> [h264|hevc|av1] [--rc vbr|cbr|cqp] [--bitrate N] [--res 720] [--profile exe.exe] [--window exe]`
   записывает реальные клипы и пишет `STATUS`/`TOOLS` в `%APPDATA%\InstantReplay\log.txt`.
+- Размер/качество видео меряй стендом `--encode-test <клип.mp4> <папка> [кадров] [av1|hevc|h264] [Мбит/с]`: один и тот же
+  клип кодируется нашим кодером с вариантами из `src/enctest.rs`, в log.txt строки `ENCTEST` с размером и SSIM к исходнику.
 - Оверлей и интерфейс проверяй на живом приложении: горячие клавиши шли через `keybd_event`, окно снимай
   `CopyFromScreen`; чтобы оверлей попал на снимок, задай `INSTANT_REPLAY_ALLOW_CAPTURE=1` при запуске.
   Мерцание и задержку измеряй покадровой записью экрана (`ffmpeg -f gdigrab -framerate 60`) и опросом пикселей.

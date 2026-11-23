@@ -480,7 +480,7 @@ impl Viewer {
 }
 
 /// Пилюля-кнопка, открывающая меню (скорость, дорожка).
-fn menu_pill(ui: &mut Ui, id: &str, icon: Option<&str>, text: &str, accent: bool, open: bool) -> Response {
+pub fn menu_pill(ui: &mut Ui, id: &str, icon: Option<&str>, text: &str, accent: bool, open: bool) -> Response {
     let font = theme::subhead();
     let g = ui.fonts(|f| f.layout_no_wrap(text.to_owned(), font.clone(), color::TEXT));
     let lead = if icon.is_some() { 22.0 } else { 0.0 };
@@ -512,7 +512,7 @@ fn menu_pill(ui: &mut Ui, id: &str, icon: Option<&str>, text: &str, accent: bool
     resp
 }
 
-fn fmt_speed(s: f32) -> String {
+pub fn fmt_speed(s: f32) -> String {
     format!("{}×", format!("{s}").replace('.', ","))
 }
 

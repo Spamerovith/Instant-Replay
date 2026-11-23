@@ -9,6 +9,7 @@ mod capture;
 mod config;
 mod encoder;
 mod engine;
+mod enctest;
 mod gpu;
 mod hotkeys;
 mod hud;
@@ -60,7 +61,7 @@ fn main() {
         let mut tries = 0;
         loop {
             let m = CreateMutexW(None, true, w!("Local\\InstantReplay.SingleInstance"));
-            if GetLastError() == ERROR_ALREADY_EXISTS && !std::env::args().any(|a| a == "--selftest") {
+            if GetLastError() == ERROR_ALREADY_EXISTS && !std::env::args().any(|a| a == "--selftest" || a == "--encode-test") {
                 if updated && tries < 75 {
                     if let Ok(h) = m {
                         let _ = CloseHandle(h);
@@ -80,6 +81,18 @@ fn main() {
         }
     }
 
+    if let Some(i) = std::env::args().position(|a| a == "--encode-test") {
+        let args: Vec<String> = std::env::args().collect();
+        let frames = args.get(i + 3).and_then(|s| s.parse().ok()).unwrap_or(600);
+        let codec = match args.get(i + 4).map(|s| s.as_str()) {
+            Some("h264") => config::Codec::H264,
+            Some("hevc") => config::Codec::Hevc,
+            _ => config::Codec::Av1,
+        };
+        let mbps = args.get(i + 5).and_then(|s| s.parse().ok()).unwrap_or(7);
+        enctest::run(std::path::Path::new(args.get(i + 1).map(|s| s.as_str()).unwrap_or("")), std::path::Path::new(args.get(i + 2).map(|s| s.as_str()).unwrap_or(".")), frames, codec, mbps);
+        return;
+    }
     if let Some(i) = std::env::args().position(|a| a == "--selftest") {
         let args: Vec<String> = std::env::args().collect();
         selftest(args.get(i + 1).cloned().unwrap_or_else(|| ".".into()), args.get(i + 2).cloned());

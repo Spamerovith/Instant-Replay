@@ -16,6 +16,17 @@ use crate::player::{ffmpeg, Player};
 use crate::util;
 
 pub const MAX_ZOOM: f32 = 8.0;
+/// Playback speeds of the quick view.
+pub const QUICK_SPEEDS: [f32; 6] = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0];
+const MENU_ROW: f32 = 34.0;
+
+/// Menus above the control row, the same as JustView's: speed and audio track.
+#[derive(Clone, Copy, PartialEq)]
+enum Menu {
+    None,
+    Speed,
+    Track,
+}
 const CONTROLS_H: f32 = 40.0;
 
 pub enum QuickAction {
@@ -51,6 +62,9 @@ pub struct QuickView {
     /// Result of the last frame screenshot and when it arrived (shown for a moment).
     shot: Arc<parking_lot::Mutex<Option<Result<PathBuf, String>>>>,
     shot_note: Option<(Result<PathBuf, String>, std::time::Instant)>,
+    menu: Menu,
+    speed_anchor: Option<Rect>,
+    track_anchor: Option<Rect>,
 }
 
 impl QuickView {
@@ -74,6 +88,9 @@ impl QuickView {
             has_next,
             shot: Arc::new(parking_lot::Mutex::new(None)),
             shot_note: None,
+            menu: Menu::None,
+            speed_anchor: None,
+            track_anchor: None,
         };
         if !path.is_file() {
             q.error = Some(tr!("Файл не найден - возможно, его переместили или удалили", "File not found - it may have been moved or deleted", "Файл не знайдено - можливо, його перемістили або видалили").into());
@@ -87,7 +104,9 @@ impl QuickView {
                 if let Some(a) = &q.audio {
                     a.set_volume(if prefs.muted { 0.0 } else { prefs.volume });
                 }
-                let mut pl = Player::new(path, info, q.audio.clone(), ctx, [2560, 1600], 1.0, false);
+                // The speed carries over from clip to clip, like in JustView.
+                let speed = if QUICK_SPEEDS.iter().any(|s| (*s - prefs.speed).abs() < 1e-3) { prefs.speed } else { 1.0 };
+                let mut pl = Player::new(path, info, q.audio.clone(), ctx, [2560, 1600], speed, false);
                 pl.set_paused(true); // opens on the first frame, a click starts it
                 q.player = Some(pl);
             }
@@ -167,6 +186,7 @@ impl QuickView {
                 action = QuickAction::Delete;
             }
             self.shot_toast(ui, stage);
+            self.menus(ui, controls, prefs);
         });
         if !matches!(action, QuickAction::None) {
             return action;
@@ -273,6 +293,14 @@ impl QuickView {
         let pos = pl.position();
         let time = format!("{} / {}", fmt_time(pos), fmt_time(dur));
         let time_w = ui.fonts(|f| f.layout_no_wrap(format!("{} / {}", fmt_time(dur), fmt_time(dur)), theme::caption(), color::TEXT).size().x);
+        let tracks: Vec<String> = pl.info.audio_tracks.iter().map(|t| t.label()).collect();
+        let cur_track = pl.audio_track;
+        let track_short = tracks.get(cur_track.min(tracks.len().saturating_sub(1))).map(|n| n.split_once(" (").map(|(a, _)| a.to_string()).unwrap_or_else(|| n.clone()));
+        let pill_w = |t: &str, icon: bool| ui.fonts(|f| f.layout_no_wrap(t.to_owned(), theme::subhead(), color::TEXT).size().x + if icon { 22.0 } else { 0.0 } + space::S16 * 2.0).clamp(64.0, 200.0);
+        let pills_w = pill_w(&super::viewer::fmt_speed(pl.speed), false) + space::S8 + if tracks.len() > 1 { pill_w(track_short.as_deref().unwrap_or(""), true) + space::S8 } else { 0.0 };
+        let (mut speed_anchor, mut track_anchor) = (None, None);
+        let open_menu = self.menu;
+        let mut toggle_menu = None;
         ui.allocate_new_ui(egui::UiBuilder::new().max_rect(row), |ui| {
             ui.horizontal_centered(|ui| {
                 ui.spacing_mut().item_spacing.x = space::S8;
@@ -287,7 +315,7 @@ impl QuickView {
                     pl.toggle();
                 }
                 // Right side first, so the seek bar takes what is left.
-                let right_w = time_w + space::S16 + size::BUTTON_MD * 4.0 + 96.0 + space::S8 * 6.0;
+                let right_w = time_w + space::S16 + size::BUTTON_MD * 4.0 + 96.0 + space::S8 * 6.0 + pills_w;
                 let seek_w = (ui.available_width() - right_w).max(80.0);
                 let (seek_r, seek) = ui.allocate_exact_size(vec2(seek_w, CONTROLS_H), Sense::click_and_drag());
                 let painter = ui.painter().clone();
@@ -357,13 +385,120 @@ impl QuickView {
                     if pl.has_video() && w::icon_button(ui, glyph::CAMERA, tr!("Скриншот кадра  S", "Frame screenshot  S", "Скриншот кадру  S")).clicked() {
                         shoot = Some(pl.position());
                     }
+                    // Speed and audio track, the same pills as in JustView.
+                    let non_default = (pl.speed - 1.0).abs() > 1e-3;
+                    let mut r = super::viewer::menu_pill(ui, "quick_speed", None, &super::viewer::fmt_speed(pl.speed), non_default, open_menu == Menu::Speed);
+                    if open_menu == Menu::None {
+                        r = r.on_hover_text(tr!("Скорость  [ ]", "Speed  [ ]", "Швидкість  [ ]")); // no tip over an open menu
+                    }
+                    if r.clicked() {
+                        toggle_menu = Some(Menu::Speed);
+                    }
+                    speed_anchor = Some(r.rect);
+                    if tracks.len() > 1 {
+                        let full_name = &tracks[cur_track.min(tracks.len() - 1)];
+                        let mut r = super::viewer::menu_pill(ui, "quick_track", Some(glyph::AUDIO), track_short.as_deref().unwrap_or(""), false, open_menu == Menu::Track);
+                        if open_menu == Menu::None {
+                            r = r.on_hover_text(trf!(["Звуковая дорожка: {full_name}  A", "Audio track: {full_name}  A", "Звукова доріжка: {full_name}  A"]));
+                        }
+                        if r.clicked() {
+                            toggle_menu = Some(Menu::Track);
+                        }
+                        track_anchor = Some(r.rect);
+                    }
                 });
             });
         });
+        self.speed_anchor = speed_anchor;
+        self.track_anchor = track_anchor;
+        if let Some(m) = toggle_menu {
+            self.menu = if self.menu == m { Menu::None } else { m };
+        }
         if let Some(at) = shoot {
             self.shoot_frame(at);
         }
         delete
+    }
+
+    /// The open speed or track menu above its pill (JustView's menu: rows, check on the current).
+    fn menus(&mut self, ui: &mut Ui, controls: Rect, prefs: &mut ViewerPrefs) {
+        let ctx = ui.ctx().clone();
+        let Some(pl) = &mut self.player else { return };
+        let (anchor, items, selected): (Option<Rect>, Vec<String>, usize) = match self.menu {
+            Menu::None => return,
+            Menu::Speed => (
+                self.speed_anchor,
+                QUICK_SPEEDS.iter().rev().map(|s| if *s == 1.0 { tr!("1× обычная", "1× normal", "1× звичайна").to_string() } else { super::viewer::fmt_speed(*s) }).collect(),
+                QUICK_SPEEDS.iter().rev().position(|s| (*s - pl.speed).abs() < 1e-3).unwrap_or(usize::MAX),
+            ),
+            Menu::Track => (self.track_anchor, pl.info.audio_tracks.iter().map(|t| t.label()).collect(), pl.audio_track),
+        };
+        let Some(anchor) = anchor else {
+            self.menu = Menu::None;
+            return;
+        };
+        let widest = items.iter().map(|t| ui.fonts(|f| f.layout_no_wrap(t.clone(), theme::subhead(), color::TEXT).size().x)).fold(0.0f32, f32::max);
+        let mw = (widest + space::S32 + space::S24).clamp(140.0, 360.0);
+        let mh = MENU_ROW * items.len() as f32 + space::S8 * 2.0;
+        let open_t = ctx.animate_bool_with_time(Id::new(("quick_menu", self.menu as u8)), true, w::dur(motion::INDICATOR));
+        let lift = (1.0 - open_t) * 8.0;
+        let left = (anchor.center().x - mw / 2.0).min(controls.right() - mw).max(controls.left());
+        let mr = Rect::from_min_size(pos2(left, anchor.top() - space::S8 - mh + lift), vec2(mw, mh));
+        let mut chosen = None;
+        egui::Area::new(Id::new("quick_menu_area")).order(egui::Order::Foreground).fixed_pos(mr.min).show(&ctx, |ui| {
+            ui.set_opacity(open_t);
+            let (rect, _) = ui.allocate_exact_size(mr.size(), Sense::click());
+            let p = ui.painter();
+            p.rect_filled(rect, Rounding::same(radius::GROUP), color::SURFACE_RAISED);
+            for (i, name) in items.iter().enumerate() {
+                let r = Rect::from_min_size(pos2(rect.left() + space::S4, rect.top() + space::S8 + i as f32 * MENU_ROW), vec2(rect.width() - space::S8, MENU_ROW));
+                let id = Id::new(("quick_menu_row", self.menu as u8, i));
+                let rr = ui.interact(r, id, Sense::click());
+                let h = ctx.animate_bool_with_time(id.with("h"), rr.hovered(), w::dur(motion::HOVER));
+                if h > 0.0 {
+                    p.rect_filled(r, Rounding::same(radius::INPUT), color::SURFACE_HOVER.gamma_multiply(h));
+                }
+                let sel = i == selected;
+                if sel {
+                    let c = pos2(r.left() + space::S16, r.center().y);
+                    p.add(egui::Shape::line(vec![c + vec2(-4.0, 0.0), c + vec2(-1.0, 3.5), c + vec2(5.0, -4.0)], egui::Stroke::new(1.5_f32, color::FOCUS)));
+                }
+                let g = ui.fonts(|f| f.layout_no_wrap(name.clone(), theme::subhead(), color::TEXT));
+                let clip = Rect::from_min_max(pos2(r.left() + space::S32, r.top()), pos2(r.right() - space::S12, r.bottom()));
+                p.with_clip_rect(clip).galley(pos2(clip.left(), r.center().y - g.size().y / 2.0), g, if sel { color::FOCUS } else { color::TEXT });
+                if rr.hovered() {
+                    ctx.set_cursor_icon(CursorIcon::PointingHand);
+                }
+                if rr.clicked() {
+                    chosen = Some(i);
+                }
+            }
+        });
+        if let Some(i) = chosen {
+            match self.menu {
+                Menu::Speed => {
+                    let s = QUICK_SPEEDS[QUICK_SPEEDS.len() - 1 - i];
+                    pl.set_speed(s);
+                    prefs.speed = s;
+                }
+                Menu::Track => pl.set_audio_track(i),
+                Menu::None => {}
+            }
+            self.menu = Menu::None;
+        } else if ctx.input(|i| i.pointer.any_pressed()) {
+            if let Some(p) = ctx.input(|i| i.pointer.interact_pos()) {
+                if !mr.contains(p) && !anchor.contains(p) {
+                    self.menu = Menu::None;
+                }
+            }
+        }
+    }
+
+    /// True while a speed / track menu is open (Esc closes it first).
+    pub fn close_menu(&mut self) -> bool {
+        let open = self.menu != Menu::None;
+        self.menu = Menu::None;
+        open
     }
 
     /// Saves the frame at `at` seconds as PNG at the clip's full size (FFmpeg reads it from the
@@ -451,6 +586,19 @@ impl QuickView {
         }
         if pressed(Key::ArrowRight) {
             pl.seek(pos + 5.0);
+        }
+        let step = |dir: i32, cur: f32| {
+            let i = QUICK_SPEEDS.iter().position(|s| (*s - cur).abs() < 1e-3).unwrap_or(2) as i32;
+            QUICK_SPEEDS[(i + dir).clamp(0, QUICK_SPEEDS.len() as i32 - 1) as usize]
+        };
+        if pressed(Key::OpenBracket) || pressed(Key::CloseBracket) || pressed(Key::Backspace) {
+            let s = if pressed(Key::Backspace) { 1.0 } else { step(if pressed(Key::OpenBracket) { -1 } else { 1 }, pl.speed) };
+            pl.set_speed(s);
+            prefs.speed = s;
+        }
+        if pressed(Key::A) && pl.info.audio_tracks.len() > 1 {
+            let t = (pl.audio_track + 1) % pl.info.audio_tracks.len();
+            pl.set_audio_track(t);
         }
         if pressed(Key::Comma) {
             pl.step_back();

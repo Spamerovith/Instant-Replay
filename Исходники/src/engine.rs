@@ -16,7 +16,7 @@ use windows::Win32::System::WinRT::{RoInitialize, RoUninitialize, RO_INIT_MULTIT
 
 use crate::audio::{self, AudioConfig, AudioOut};
 use crate::capture::{self, sources, Capture};
-use crate::config::{Codec, Config, PipelineKey};
+use crate::config::{Codec, Config, PipelineKey, RateControl};
 use crate::encoder::video::{EncodedFrame, EncoderOption, VideoEncoder, VideoSettings};
 use crate::gpu::{self, Converter, Gpu};
 use crate::media::bitstream::{self, BitstreamConverter};
@@ -124,6 +124,11 @@ struct Engine {
     /// Executable of the active game profile.
     active_exe: Option<String>,
     profile_check: Instant,
+    /// When each profiled game was first seen running (lower-case exe): with two games open the
+    /// one that started first keeps its settings.
+    game_seen: std::collections::HashMap<String, Instant>,
+    /// The active game's window went missing at this moment (loading screens, mode switches).
+    active_lost: Option<Instant>,
     status: SharedStatus,
     notify: Notifier,
     pipeline: Option<Pipeline>,
@@ -134,7 +139,7 @@ struct Engine {
 impl Engine {
     fn new(config: Config, status: SharedStatus, notify: Notifier) -> Self {
         let base = config.clone();
-        Engine { config, base, active_exe: None, profile_check: Instant::now() - Duration::from_secs(10), status, notify, pipeline: None, recording: false, retry_at: None }
+        Engine { config, base, active_exe: None, profile_check: Instant::now() - Duration::from_secs(10), game_seen: Default::default(), active_lost: None, status, notify, pipeline: None, recording: false, retry_at: None }
     }
 
     fn run(mut self, rx: Receiver<Command>) {
@@ -316,9 +321,26 @@ impl Engine {
         }
         self.profile_check = Instant::now();
         let exes: Vec<String> = sources::windows().into_iter().map(|w| w.exe).collect();
-        // The active game keeps the profile as long as it runs.
-        let keep = self.active_exe.as_ref().filter(|a| exes.iter().any(|e| e.eq_ignore_ascii_case(a))).cloned();
-        let want = keep.or_else(|| crate::config::find_profile(&self.base.profiles, &exes).map(|i| self.base.profiles[i].exe.clone()));
+        let now = Instant::now();
+        // Remember when each profiled game showed up; forget the ones that are gone.
+        for p in &self.base.profiles {
+            let key = p.exe.to_lowercase();
+            if !p.exe.is_empty() && exes.iter().any(|e| e.eq_ignore_ascii_case(&p.exe)) {
+                self.game_seen.entry(key).or_insert(now);
+            } else {
+                self.game_seen.remove(&key);
+            }
+        }
+        // The active game keeps the profile while it runs (and for a short while after its
+        // window disappears), even when another profiled game is started.
+        let active_running = self.active_exe.as_ref().map_or(false, |a| exes.iter().any(|e| e.eq_ignore_ascii_case(a)));
+        self.active_lost = if active_running || self.active_exe.is_none() { None } else { self.active_lost.or(Some(now)) };
+        let in_grace = self.active_lost.map_or(false, |t| t.elapsed() < Duration::from_secs(10));
+        let want = if active_running || in_grace {
+            self.active_exe.clone()
+        } else {
+            crate::config::first_started_profile(&self.base.profiles, &self.game_seen).map(|i| self.base.profiles[i].exe.clone())
+        };
         if want == self.active_exe {
             return;
         }
@@ -707,11 +729,20 @@ fn video_thread(
         bitrate_mbps: 0,
         quality: cfg.quality,
         preset: cfg.preset,
+        low_latency: true,
+        gop_secs: 2,
+        peak_mbps: 0,
     };
     let enc = loop {
         let (w, h) = fit_codec_limits(codec, out);
         settings.codec = codec;
         settings.bitrate_mbps = if cfg.auto_bitrate { crate::config::auto_bitrate_mbps(codec, w, h, cfg.fps, cfg.bitrate_quality) } else { cfg.bitrate_mbps };
+        if cfg.auto_bitrate && cfg.rate_control != RateControl::Cqp {
+            // Auto: constant quality. Calm scenes and the desktop take a fraction of the old fixed
+            // bitrate, busy ones what they need; on average the same SSIM at about 40 % less size.
+            settings.rate_control = RateControl::Cqp;
+            settings.quality = cfg.bitrate_quality.cq_level();
+        }
         settings.width = w;
         settings.height = h;
         match VideoEncoder::new(&gpu, &settings) {

@@ -36,6 +36,12 @@ pub struct VideoSettings {
     pub bitrate_mbps: u32,
     pub quality: u32,
     pub preset: Preset,
+    /// Encoder low-latency mode (worse compression; recording does not need it).
+    pub low_latency: bool,
+    /// Keyframe interval in seconds.
+    pub gop_secs: u32,
+    /// Peak bitrate cap for the constant-quality mode (0 = none).
+    pub peak_mbps: u32,
 }
 
 fn subtype(c: Codec) -> GUID {
@@ -172,7 +178,7 @@ impl VideoEncoder {
             if is_async {
                 a.SetUINT32(&MF_TRANSFORM_ASYNC_UNLOCK, 1)?;
             }
-            let _ = a.SetUINT32(&MF_LOW_LATENCY, 1);
+            let _ = a.SetUINT32(&MF_LOW_LATENCY, s.low_latency as u32);
         }
 
         let mut token = 0u32;
@@ -185,7 +191,7 @@ impl VideoEncoder {
         }
 
         let codec_api: Option<ICodecAPI> = mft.cast().ok();
-        let gop = (s.fps * 2).max(1);
+        let gop = (s.fps * s.gop_secs.max(1)).max(1);
         if let Some(api) = &codec_api {
             Self::configure(api, s, gop);
         }
@@ -312,6 +318,9 @@ impl VideoEncoder {
                 // QP: quality 100 → 12, quality 1 → 45 (H.264/HEVC scale; AV1 MFTs map it too).
                 let qp = (45.0 - (s.quality.clamp(1, 100) as f64 - 1.0) / 99.0 * 33.0).round() as u64;
                 set_api(api, &CODECAPI_AVEncVideoEncodeQP, VARIANT::from(qp), "qp");
+                if s.peak_mbps > 0 {
+                    set_api(api, &CODECAPI_AVEncCommonMaxBitRate, VARIANT::from(s.peak_mbps * 1_000_000), "max");
+                }
             }
         }
         let speed = match s.preset {
@@ -322,7 +331,7 @@ impl VideoEncoder {
         set_api(api, &CODECAPI_AVEncCommonQualityVsSpeed, VARIANT::from(speed), "preset");
         set_api(api, &CODECAPI_AVEncMPVGOPSize, VARIANT::from(gop), "gop");
         set_api(api, &CODECAPI_AVEncMPVDefaultBPictureCount, VARIANT::from(0u32), "bframes");
-        set_api(api, &CODECAPI_AVLowLatencyMode, VARIANT::from(true), "lowlatency");
+        set_api(api, &CODECAPI_AVLowLatencyMode, VARIANT::from(s.low_latency), "lowlatency");
     }
 
     /// Gets a free NV12 surface from the pool. `None` when the encoder still holds them all.

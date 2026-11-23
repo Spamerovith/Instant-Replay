@@ -377,6 +377,15 @@ impl BitrateQuality {
             BitrateQuality::High => 1.5,
         }
     }
+    /// Encoder quality level (1-100) of the auto mode: constant quality, measured with the
+    /// encoder bench (`--encode-test`) to match the old fixed-bitrate files' average SSIM.
+    pub fn cq_level(self) -> u32 {
+        match self {
+            BitrateQuality::Compact => 60,
+            BitrateQuality::Standard => 70,
+            BitrateQuality::High => 80,
+        }
+    }
     pub fn label(self) -> &'static str {
         match self {
             BitrateQuality::Compact => tr!("Компактно", "Compact", "Компактно"),
@@ -428,6 +437,17 @@ impl Config {
 }
 
 /// Index of the first profile whose game is among the running window executables.
+/// Among the running profiled games, the one first seen running (ties: list order).
+pub fn first_started_profile(profiles: &[GameProfile], seen: &std::collections::HashMap<String, std::time::Instant>) -> Option<usize> {
+    profiles
+        .iter()
+        .enumerate()
+        .filter_map(|(i, p)| seen.get(&p.exe.to_lowercase()).map(|t| (*t, i)))
+        .min()
+        .map(|(_, i)| i)
+}
+
+#[allow(dead_code)]
 pub fn find_profile(profiles: &[GameProfile], running_exes: &[String]) -> Option<usize> {
     profiles.iter().position(|p| !p.exe.is_empty() && running_exes.iter().any(|e| e.eq_ignore_ascii_case(&p.exe)))
 }
@@ -435,6 +455,24 @@ pub fn find_profile(profiles: &[GameProfile], running_exes: &[String]) -> Option
 #[cfg(test)]
 mod profile_tests {
     use super::*;
+
+    #[test]
+    fn first_started_game_wins() {
+        let base = Config::default();
+        let a = GameProfile::from_config("a.exe", "A", &base);
+        let b = GameProfile::from_config("b.exe", "B", &base);
+        let profiles = vec![a, b];
+        let t0 = std::time::Instant::now();
+        let mut seen = std::collections::HashMap::new();
+        seen.insert("b.exe".to_string(), t0);
+        seen.insert("a.exe".to_string(), t0 + std::time::Duration::from_secs(5));
+        assert_eq!(first_started_profile(&profiles, &seen), Some(1)); // B started first
+        seen.clear();
+        assert_eq!(first_started_profile(&profiles, &seen), None);
+        seen.insert("a.exe".to_string(), t0);
+        seen.insert("b.exe".to_string(), t0);
+        assert_eq!(first_started_profile(&profiles, &seen), Some(0)); // same check: list order
+    }
 
     #[test]
     fn quality_scales_auto_bitrate() {
