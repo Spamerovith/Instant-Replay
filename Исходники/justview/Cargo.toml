@@ -1,6 +1,6 @@
 [package]
 name = "justview"
-version = "1.3.1"
+version = "1.3.2"
 edition = "2024"
 description = "JustView — ультрабыстрый просмотрщик фото, видео и любых файлов"
 authors = ["JustView"]

@@ -112,6 +112,28 @@ enum Dialog {
 }
 
 const REPO: &str = "Spamerovith/JustView";
+
+/// JustView запущен из папки, куда его распаковывает Instant Replay (`%LOCALAPPDATA%\InstantReplay\tools`)
+fn embedded_in_instant_replay() -> bool {
+    std::env::current_exe().map(|p| is_instant_replay_tools(&p)).unwrap_or(false)
+}
+
+fn is_instant_replay_tools(exe: &std::path::Path) -> bool {
+    let s = exe.to_string_lossy().to_ascii_lowercase().replace('/', "\\");
+    s.contains("\\instantreplay\\tools\\")
+}
+
+#[cfg(test)]
+mod embed_tests {
+    use super::is_instant_replay_tools;
+    use std::path::Path;
+
+    #[test]
+    fn detects_instant_replay_tools_folder() {
+        assert!(is_instant_replay_tools(Path::new(r"C:\Users\u\AppData\Local\InstantReplay\tools\JustView.exe")));
+        assert!(!is_instant_replay_tools(Path::new(r"E:\Apps\JustView\JustView.exe")));
+    }
+}
 const UA: &str = "JustView-update-check";
 
 struct Toast {
@@ -210,8 +232,9 @@ impl App {
             app.dialog = Dialog::Language(true);
         }
         // Не чаще раза в сутки: JustView открывается на каждый файл.
+        // Копию, вшитую в Instant Replay, обновляет сам Instant Replay - она GitHub не проверяет
         let now = crate::update::now();
-        if now.saturating_sub(app.settings.update_checked) > 24 * 3600 {
+        if !embedded_in_instant_replay() && now.saturating_sub(app.settings.update_checked) > 24 * 3600 {
             app.settings.update_checked = now;
             app.settings.save();
             let ctx = cc.egui_ctx.clone();
@@ -577,14 +600,10 @@ impl eframe::App for App {
         let cur = self.cur().cloned();
         let decoded = cur.as_ref().and_then(|p| self.cache.get(p).cloned());
 
-        // Заголовок окна
+        // Заголовок окна - всегда просто «JustView», без имени файла
         if self.titled != cur {
             self.titled = cur.clone();
-            let t = match &cur {
-                Some(p) => format!("{} - JustView", p.file_name().unwrap_or_default().to_string_lossy()),
-                None => "JustView".into(),
-            };
-            ctx.send_viewport_cmd(ViewportCommand::Title(t));
+            ctx.send_viewport_cmd(ViewportCommand::Title("JustView".into()));
         }
 
         // Плеер для видео/аудио
@@ -1462,14 +1481,19 @@ impl App {
 
         // Ряд 1: время + шкала
         let row1 = Rect::from_min_size(rect.min + vec2(SP_16, SP_12), vec2(w - SP_32, 24.0));
-        let tw = 56.0;
         let shown_pos = if self.scrubbing.is_some() { self.player.as_ref().map(|p| p.position()).unwrap_or(pos) } else { pos };
         let n_frames = match &d.content { Content::Image { frames, .. } => frames.len(), _ => 0 };
         let pos_text = if is_anim { format!("{} / {}", self.anim.frame + 1, n_frames) } else { fmt_time(shown_pos) };
-        painter.text(pos2(row1.left(), row1.center().y), Align2::LEFT_CENTER, pos_text, regular(T_FOOTNOTE), TEXT.gamma_multiply(alpha));
         let dur_text = if is_anim { trf!(["{:.1} с", "{:.1} s", "{:.1} с"], dur).replace('.', ",") } else { fmt_time(dur) };
+        // Место под подписи меряем по самому широкому значению, чтобы шкала не прыгала
+        // и счётчик кадров gif («145 / 248») не налезал на неё
+        let widest_pos = if is_anim { format!("{n} / {n}", n = n_frames) } else { fmt_time(dur) };
+        let measure = |s: String| painter.layout_no_wrap(s, regular(T_FOOTNOTE), TEXT).size().x;
+        let lw = measure(widest_pos).max(40.0) + SP_12;
+        let rw = measure(dur_text.clone()).max(40.0) + SP_12;
+        painter.text(pos2(row1.left(), row1.center().y), Align2::LEFT_CENTER, pos_text, regular(T_FOOTNOTE), TEXT.gamma_multiply(alpha));
         painter.text(pos2(row1.right(), row1.center().y), Align2::RIGHT_CENTER, dur_text, regular(T_FOOTNOTE), TEXT_SECONDARY.gamma_multiply(alpha));
-        let bar = Rect::from_min_max(pos2(row1.left() + tw, row1.top()), pos2(row1.right() - tw - 8.0, row1.bottom()));
+        let bar = Rect::from_min_max(pos2(row1.left() + lw, row1.top()), pos2(row1.right() - rw, row1.bottom()));
         let seek = ui.interact(bar, Id::new("seek"), Sense::click_and_drag());
         let hv = ctx.animate_bool_with_time(Id::new("seek_h"), seek.hovered() || seek.dragged(), M_MICRO);
         let th = 4.0 + 2.0 * hv;
