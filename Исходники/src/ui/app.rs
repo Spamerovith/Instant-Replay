@@ -107,6 +107,13 @@ impl UiShared {
             // The frame is removed here and not through egui's `Decorations`: any winit
             // window-flag change re-applies its own idea of visibility and would show the
             // program window again after the overlay closes.
+            // Invisible until the overlay has drawn its first frame (no flash of the old content).
+            set_transitions(h, false);
+            set_opaque(h, false);
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(600));
+                set_opaque(h, true); // safety net: never leave the window invisible
+            });
             SetWindowLongPtrW(hwnd, GWL_STYLE, style & !OVERLAY_FRAME);
             if IsIconic(hwnd).as_bool() || IsZoomed(hwnd).as_bool() {
                 // Leave the minimized / maximized state straight into the overlay rectangle
@@ -128,6 +135,18 @@ impl UiShared {
                 rect.bottom - rect.top,
                 SWP_NOSENDCHANGING | SWP_FRAMECHANGED | SWP_SHOWWINDOW | SWP_NOACTIVATE,
             );
+            // The window takes the focus only once the hotkey's modifiers are released: a lone
+            // Alt key-up arriving at the freshly focused window would otherwise start its menu mode.
+            {
+                use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_CONTROL, VK_MENU, VK_SHIFT};
+                for _ in 0..40 {
+                    let down = |vk: u16| GetAsyncKeyState(vk as i32) as u16 & 0x8000 != 0;
+                    if !(down(VK_MENU.0) || down(VK_CONTROL.0) || down(VK_SHIFT.0)) {
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+            }
             let _ = SetForegroundWindow(hwnd);
         }
         self.visible.store(true, Ordering::SeqCst);
@@ -264,6 +283,8 @@ const AUDIO_BITRATES: [u32; 3] = [128, 160, 192];
 struct OverlayMode {
     focused: bool,
     opened: Instant,
+    /// Frames drawn so far: the overlay stays see-through until its first frame is on screen.
+    frames: u32,
 }
 
 pub struct App {
@@ -449,6 +470,19 @@ impl eframe::App for App {
         }
         self.delete_dialog(ctx);
         if self.overlay.is_some() {
+            if let Some(ov) = &mut self.overlay {
+                if ov.frames < 4 {
+                    // Frames count only once egui knows the overlay size (the first one is drawn at the old size).
+                    if (ctx.screen_rect().width() - size::OVERLAY_W).abs() < 2.0 {
+                        ov.frames += 1;
+                    }
+                    if ov.frames == 4 {
+                        set_opaque(self.shared.hwnd.load(Ordering::SeqCst), true);
+                    } else {
+                        ctx.request_repaint();
+                    }
+                }
+            }
             self.overlay_ui(ctx, &status);
             self.sync_config(ctx);
             ctx.request_repaint_after(Duration::from_millis(250));
@@ -1405,7 +1439,7 @@ fn estimate_memory(cfg: &Config, out: (u32, u32)) -> String {
 impl App {
     fn enter_overlay(&mut self, ctx: &egui::Context) {
         // The window was already moved, resized and put on top by `UiShared::place_as_overlay`.
-        self.overlay = Some(OverlayMode { focused: false, opened: Instant::now() });
+        self.overlay = Some(OverlayMode { focused: false, opened: Instant::now(), frames: 0 });
         self.overlay_clips_at = None;
         self.shared.in_overlay.store(true, Ordering::SeqCst);
         self.shared.exclude_from_capture(true);
@@ -1418,8 +1452,10 @@ impl App {
             return;
         }
         self.shared.in_overlay.store(false, Ordering::SeqCst);
+        set_opaque(self.shared.hwnd.load(Ordering::SeqCst), true);
         self.shared.exclude_from_capture(false);
         self.shared.restore_after_overlay(open_full);
+        set_transitions(self.shared.hwnd.load(Ordering::SeqCst), true);
         ctx.request_repaint();
     }
 
@@ -1787,5 +1823,46 @@ impl App {
         if let Some(i) = remove {
             self.cfg.profiles.remove(i);
         }
+    }
+}
+
+/// Makes the window fully see-through (layered, alpha 0) or normal again. Used while the overlay
+/// shows up, so the window never flashes with stale content before its first frame is drawn.
+fn set_opaque(hwnd: isize, opaque: bool) {
+    use windows::Win32::Foundation::{COLORREF, HWND};
+    use windows::Win32::UI::WindowsAndMessaging::*;
+    if hwnd == 0 {
+        return;
+    }
+    unsafe {
+        let h = HWND(hwnd as _);
+        let ex = GetWindowLongPtrW(h, GWL_EXSTYLE);
+        let layered = WS_EX_LAYERED.0 as isize;
+        if opaque {
+            if ex & layered != 0 {
+                let _ = SetLayeredWindowAttributes(h, COLORREF(0), 255, LWA_ALPHA);
+                SetWindowLongPtrW(h, GWL_EXSTYLE, ex & !layered);
+            }
+        } else {
+            if ex & layered == 0 {
+                SetWindowLongPtrW(h, GWL_EXSTYLE, ex | layered);
+            }
+            let _ = SetLayeredWindowAttributes(h, COLORREF(0), 0, LWA_ALPHA);
+        }
+    }
+}
+
+/// Windows animates a window that appears or disappears (fade and scale); for the overlay that
+/// shows up as a flicker, so the animation is off while the overlay is in use.
+fn set_transitions(hwnd: isize, enabled: bool) {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWINDOWATTRIBUTE};
+    if hwnd == 0 {
+        return;
+    }
+    const DWMWA_TRANSITIONS_FORCEDISABLED: i32 = 3;
+    let disabled: u32 = if enabled { 0 } else { 1 };
+    unsafe {
+        let _ = DwmSetWindowAttribute(HWND(hwnd as _), DWMWINDOWATTRIBUTE(DWMWA_TRANSITIONS_FORCEDISABLED), &disabled as *const u32 as *const _, 4);
     }
 }
