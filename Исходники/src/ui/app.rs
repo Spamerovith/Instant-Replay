@@ -162,9 +162,12 @@ impl UiShared {
             // Frame back first, then the old placement: it restores the outer rectangle.
             let cur = GetWindowLongPtrW(hwnd, GWL_STYLE);
             SetWindowLongPtrW(hwnd, GWL_STYLE, (cur & !OVERLAY_FRAME) | (s.style & OVERLAY_FRAME));
+            // Behind the game the window goes to the very bottom of the z-order, so it can never
+            // end up above the game (a top-most game used to leave it on top).
+            let behind_game = !open_full && !s.hidden && !prev_fg.is_invalid() && prev_fg != hwnd;
             let _ = SetWindowPos(
                 hwnd,
-                HWND_NOTOPMOST,
+                if behind_game { HWND_BOTTOM } else { HWND_NOTOPMOST },
                 0,
                 0,
                 0,
@@ -189,10 +192,8 @@ impl UiShared {
                 wp.showCmd = if was_max { SW_SHOWMAXIMIZED.0 } else { SW_SHOWNOACTIVATE.0 } as u32;
                 let _ = SetWindowPlacement(hwnd, &wp);
                 // Back behind the game, not on top of it.
-                let fg = GetForegroundWindow();
-                let behind = if !fg.is_invalid() && fg != hwnd { fg } else { prev_fg };
-                if !behind.is_invalid() && behind != hwnd && (GetWindowLongPtrW(behind, GWL_EXSTYLE) & WS_EX_TOPMOST.0 as isize) == 0 {
-                    let _ = SetWindowPos(hwnd, behind, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+                if behind_game {
+                    let _ = SetWindowPos(hwnd, HWND_BOTTOM, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
                 }
             }
         }
@@ -254,7 +255,8 @@ fn pages() -> [(Page, &'static str, &'static str); 5] {
 }
 
 const REPLAY_STEPS: [u32; 11] = [15, 30, 45, 60, 90, 120, 180, 300, 600, 900, 1200];
-const FPS_STEPS: [u32; 6] = [30, 60, 120, 144, 165, 240];
+const LAST_STEPS: [u32; 11] = [5, 10, 15, 20, 30, 45, 60, 90, 120, 180, 300];
+const FPS_STEPS:[u32; 6] = [30, 60, 120, 144, 165, 240];
 const AUDIO_BITRATES: [u32; 3] = [128, 160, 192];
 
 struct OverlayMode {
@@ -349,6 +351,7 @@ impl App {
     fn hotkey_bindings(c: &Config) -> Vec<(Action, Hotkey)> {
         vec![
             (Action::SaveReplay, c.hotkey_save_replay),
+            (Action::SaveLast, c.hotkey_save_last),
             (Action::ToggleRecording, c.hotkey_record),
             (Action::ToggleReplay, c.hotkey_toggle_replay),
             (Action::ToggleOverlay, c.hotkey_overlay),
@@ -912,7 +915,7 @@ impl App {
 
         let idx = REPLAY_STEPS.iter().position(|&s| s >= self.cfg.replay_seconds).unwrap_or(REPLAY_STEPS.len() - 1);
         let mut fidx = idx as f32;
-        let mem = estimate_memory(&self.cfg);
+        let mem = estimate_memory(&self.cfg, st.out_size);
         w::group(ui, Some("Instant Replay"), |g| {
             g.row(tr!("Длительность буфера", "Buffer length", "Тривалість буфера"), Some(&mem), |ui| {
                 w::value_text(ui, &util::format_duration(self.cfg.replay_seconds as f64));
@@ -956,14 +959,28 @@ impl App {
                     }
                 });
             } else {
-                let hint = bitrate_hint(&self.cfg, st.out_size);
-                g.row(tr!("Битрейт", "Bitrate", "Бітрейт"), Some(&hint), |ui| {
-                    w::value_text(ui, &trf!(["{} Мбит/с", "{} Mbps", "{} Мбіт/с"], self.cfg.bitrate_mbps));
-                    let mut v = self.cfg.bitrate_mbps as f32;
-                    if w::slider(ui, "bitrate", &mut v, 5.0, 150.0, 1.0, 220.0).changed() {
-                        self.cfg.bitrate_mbps = v as u32;
-                    }
-                });
+                let (aw, ah) = picture_size(&self.cfg, st.out_size);
+                let auto = crate::config::auto_bitrate_mbps(self.cfg.codec, aw, ah, self.cfg.fps);
+                g.row(
+                    tr!("Автобитрейт", "Auto bitrate", "Автобітрейт"),
+                    Some(tr!("Подбирается под разрешение, частоту кадров и кодек: файлы легче при той же чёткости", "Matched to resolution, frame rate and codec: lighter files at the same sharpness", "Добирається під роздільність, частоту кадрів і кодек: файли легші за тієї ж чіткості")),
+                    |ui| {
+                        if self.cfg.auto_bitrate {
+                            w::value_text(ui, &trf!(["{} Мбит/с", "{} Mbps", "{} Мбіт/с"], auto));
+                        }
+                        w::switch(ui, &mut self.cfg.auto_bitrate, tr!("Автобитрейт", "Auto bitrate", "Автобітрейт"));
+                    },
+                );
+                if !self.cfg.auto_bitrate {
+                    let hint = bitrate_hint(&self.cfg, st.out_size);
+                    g.row(tr!("Битрейт", "Bitrate", "Бітрейт"), Some(&hint), |ui| {
+                        w::value_text(ui, &trf!(["{} Мбит/с", "{} Mbps", "{} Мбіт/с"], self.cfg.bitrate_mbps));
+                        let mut v = self.cfg.bitrate_mbps as f32;
+                        if w::slider(ui, "bitrate", &mut v, 3.0, 150.0, 1.0, 220.0).changed() {
+                            self.cfg.bitrate_mbps = v as u32;
+                        }
+                    });
+                }
             }
             g.row(tr!("Пресет кодера", "Encoder preset", "Пресет кодера"), None, |ui| {
                 let presets = [Preset::Speed, Preset::Balanced, Preset::Quality];
@@ -1129,6 +1146,7 @@ impl App {
     fn hotkey_mut(&mut self, a: Action) -> &mut Hotkey {
         match a {
             Action::SaveReplay => &mut self.cfg.hotkey_save_replay,
+            Action::SaveLast => &mut self.cfg.hotkey_save_last,
             Action::ToggleRecording => &mut self.cfg.hotkey_record,
             Action::ToggleReplay => &mut self.cfg.hotkey_toggle_replay,
             Action::ToggleOverlay => &mut self.cfg.hotkey_overlay,
@@ -1138,8 +1156,10 @@ impl App {
     fn page_hotkeys(&mut self, ui: &mut Ui) {
         page_title(ui, tr!("Горячие клавиши", "Hotkeys", "Гарячі клавіші"));
         let failed = self.hotkeys.failed();
+        let last_label = trf!(["Сохранить последние {} с", "Save the last {} s", "Зберегти останні {} с"], self.cfg.save_last_seconds);
         let rows = [
             (Action::SaveReplay, tr!("Сохранить повтор", "Save replay", "Зберегти повтор")),
+            (Action::SaveLast, last_label.as_str()),
             (Action::ToggleRecording, tr!("Начать / остановить запись", "Start / stop recording", "Почати / зупинити запис")),
             (Action::ToggleReplay, tr!("Включить / выключить Instant Replay", "Turn Instant Replay on / off", "Увімкнути / вимкнути Instant Replay")),
             (Action::ToggleOverlay, tr!("Открыть / закрыть оверлей", "Open / close overlay", "Відкрити / закрити оверлей")),
@@ -1149,6 +1169,7 @@ impl App {
             for (a, label) in rows {
                 let hk = match a {
                     Action::SaveReplay => self.cfg.hotkey_save_replay,
+                    Action::SaveLast => self.cfg.hotkey_save_last,
                     Action::ToggleRecording => self.cfg.hotkey_record,
                     Action::ToggleReplay => self.cfg.hotkey_toggle_replay,
                     Action::ToggleOverlay => self.cfg.hotkey_overlay,
@@ -1175,6 +1196,26 @@ impl App {
                 });
             }
         });
+        ui.add_space(space::S24);
+        let max_last = self.cfg.replay_seconds.max(5);
+        let mut steps: Vec<u32> = LAST_STEPS.iter().copied().filter(|&s| s <= max_last).collect();
+        if steps.is_empty() {
+            steps.push(5);
+        }
+        let idx = steps.iter().position(|&s| s >= self.cfg.save_last_seconds).unwrap_or(steps.len() - 1);
+        let mut fidx = idx as f32;
+        w::group(ui, Some(tr!("Быстрое сохранение", "Quick save", "Швидке збереження")), |g| {
+            g.row(
+                tr!("Сколько секунд сохранять", "Seconds to save", "Скільки секунд зберігати"),
+                Some(tr!("Берётся конец буфера, не больше его длины", "Takes the end of the buffer, no more than its length", "Береться кінець буфера, не більше його довжини")),
+                |ui| {
+                    w::value_text(ui, &util::format_duration(self.cfg.save_last_seconds as f64));
+                    if steps.len() > 1 && w::slider(ui, "save-last-len", &mut fidx, 0.0, (steps.len() - 1) as f32, 1.0, 220.0).changed() {
+                        self.cfg.save_last_seconds = steps[fidx.round() as usize];
+                    }
+                },
+            );
+        });
         if let Some(a) = start {
             self.capturing = Some(a);
             self.capture_hint = tr!("Нажмите сочетание…", "Press a shortcut…", "Натисніть комбінацію…").into();
@@ -1185,6 +1226,7 @@ impl App {
     fn applied_hotkey(&self, a: Action) -> Hotkey {
         match a {
             Action::SaveReplay => self.applied.hotkey_save_replay,
+            Action::SaveLast => self.applied.hotkey_save_last,
             Action::ToggleRecording => self.applied.hotkey_record,
             Action::ToggleReplay => self.applied.hotkey_toggle_replay,
             Action::ToggleOverlay => self.applied.hotkey_overlay,
@@ -1313,8 +1355,10 @@ fn bitrate_hint(cfg: &Config, out: (u32, u32)) -> String {
     trf!(["Для {}p {} к/с чётко от {:.0} Мбит/с", "For {}p {} fps, sharp from {:.0} Mbps", "Для {}p {} к/с чітко від {:.0} Мбіт/с"], h, cfg.fps, (base / 5.0).round() * 5.0)
 }
 
-fn estimate_memory(cfg: &Config) -> String {
-    let mbps = if cfg.rate_control == RateControl::Cqp { cfg.bitrate_mbps.max(40) as f64 } else { cfg.bitrate_mbps as f64 * if cfg.rate_control == RateControl::Vbr { 1.1 } else { 1.0 } };
+fn estimate_memory(cfg: &Config, out: (u32, u32)) -> String {
+    let (pw, ph) = picture_size(cfg, out);
+    let rate = if cfg.auto_bitrate { crate::config::auto_bitrate_mbps(cfg.codec, pw, ph, cfg.fps) } else { cfg.bitrate_mbps };
+    let mbps = if cfg.rate_control == RateControl::Cqp { rate.max(40) as f64 } else { rate as f64 * if cfg.rate_control == RateControl::Vbr { 1.1 } else { 1.0 } };
     let bytes = (mbps * 1_000_000.0 / 8.0 + 3.0 * 24_000.0) * cfg.replay_seconds as f64;
     let prefix = if cfg.rate_control == RateControl::Cqp { tr!("до ≈", "up to ≈", "до ≈") } else { "≈" };
     trf!(["Займёт {} {} оперативной памяти", "Uses {} {} of RAM", "Займе {} {} оперативної пам'яті"], prefix, util::format_bytes(bytes as u64))
@@ -1502,4 +1546,16 @@ fn gallery_tile(ui: &mut Ui, clip: &crate::engine::ClipInfo, tile_w: f32) -> egu
     p.galley(pill.min + vec2(5.0, 2.0), g, color::TEXT);
     p.text(egui::pos2(rect.center().x, rect.bottom() - 8.0), egui::Align2::CENTER_BOTTOM, util::format_bytes(clip.bytes), theme::caption(), color::TEXT_SECONDARY);
     resp
+}
+
+/// Picture size the encoder works at (the running pipeline's, or an estimate from the settings).
+fn picture_size(cfg: &Config, out: (u32, u32)) -> (u32, u32) {
+    if let Some(h) = cfg.resolution.height() {
+        return ((h * 16 / 9) & !1, h);
+    }
+    if out.0 > 0 && out.1 > 0 {
+        out
+    } else {
+        (1920, 1080)
+    }
 }

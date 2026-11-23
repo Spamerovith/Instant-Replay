@@ -55,7 +55,7 @@ fn main() {
         let mut tries = 0;
         loop {
             let m = CreateMutexW(None, true, w!("Local\\InstantReplay.SingleInstance"));
-            if GetLastError() == ERROR_ALREADY_EXISTS {
+            if GetLastError() == ERROR_ALREADY_EXISTS && !std::env::args().any(|a| a == "--selftest") {
                 if updated && tries < 75 {
                     if let Ok(h) = m {
                         let _ = CloseHandle(h);
@@ -118,12 +118,14 @@ fn main() {
         let shared_hk = shared.clone();
         let bindings = vec![
             (Action::SaveReplay, cfg.hotkey_save_replay),
+            (Action::SaveLast, cfg.hotkey_save_last),
             (Action::ToggleRecording, cfg.hotkey_record),
             (Action::ToggleReplay, cfg.hotkey_toggle_replay),
             (Action::ToggleOverlay, cfg.hotkey_overlay),
         ];
         hotkeys::Hotkeys::start(bindings, move |a| match a {
             Action::SaveReplay => engine.send(Command::SaveReplay),
+            Action::SaveLast => engine.send(Command::SaveLast),
             Action::ToggleRecording => {
                 // Stopping gets its own chime here; starting is confirmed by the engine once
                 // the first keyframe is on disk.
@@ -265,6 +267,7 @@ fn selftest(dir: String, codec: Option<String>) {
     let mut cfg = Config::default();
     cfg.output_dir = std::path::PathBuf::from(dir);
     cfg.replay_seconds = 15;
+    cfg.save_last_seconds = 5;
     cfg.mic_enabled = std::env::args().any(|a| a == "--mic");
     cfg.codec = match codec.as_deref() {
         Some("hevc") => config::Codec::Hevc,
@@ -274,6 +277,13 @@ fn selftest(dir: String, codec: Option<String>) {
     let args: Vec<String> = std::env::args().collect();
     if let Some(i) = args.iter().position(|a| a == "--window") {
         cfg.source = config::CaptureSource::Window { title: String::new(), exe: args.get(i + 1).cloned().unwrap_or_default() };
+    }
+    if let Some(i) = args.iter().position(|a| a == "--bitrate") {
+        cfg.auto_bitrate = false;
+        cfg.bitrate_mbps = args.get(i + 1).and_then(|s| s.parse().ok()).unwrap_or(50);
+    }
+    if let Some(i) = args.iter().position(|a| a == "--res") {
+        cfg.resolution = if args.get(i + 1).map(|s| s.as_str()) == Some("720") { config::Resolution::P720 } else { config::Resolution::P1080 };
     }
     if let Some(i) = args.iter().position(|a| a == "--rc") {
         cfg.rate_control = match args.get(i + 1).map(|s| s.as_str()) {
@@ -285,6 +295,8 @@ fn selftest(dir: String, codec: Option<String>) {
     let notifier: engine::Notifier = Arc::new(|n: Notice| log::info!("NOTICE {:?}: {} | {}", n.kind, n.title, n.detail));
     let e = engine::start(cfg, notifier);
     std::thread::sleep(Duration::from_secs(8));
+    e.send(Command::SaveLast);
+    std::thread::sleep(Duration::from_millis(1500));
     {
         let s = e.status.read();
         log::info!("STATUS running={} buffered={:.1}s bytes={} enc='{}' out={:?} dropped={} err={:?}", s.running, s.buffered_secs, s.buffer_bytes, s.encoder_name, s.out_size, s.dropped_frames, s.error);

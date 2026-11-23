@@ -108,6 +108,8 @@ pub struct Config {
     pub codec: Codec,
     pub rate_control: RateControl,
     pub bitrate_mbps: u32,
+    /// Bitrate follows the picture size, frame rate and codec; `bitrate_mbps` is used when off.
+    pub auto_bitrate: bool,
     /// 1..=100, higher is better. Used in CQP mode.
     pub quality: u32,
     pub preset: Preset,
@@ -124,6 +126,9 @@ pub struct Config {
     pub audio_bitrate_kbps: u32,
 
     pub hotkey_save_replay: Hotkey,
+    /// Saves only the last `save_last_seconds` of the buffer.
+    pub hotkey_save_last: Hotkey,
+    pub save_last_seconds: u32,
     pub hotkey_record: Hotkey,
     pub hotkey_toggle_replay: Hotkey,
     pub hotkey_overlay: Hotkey,
@@ -144,6 +149,7 @@ pub struct Config {
 pub const VK_F9: u32 = 0x78;
 pub const VK_F10: u32 = 0x79;
 pub const VK_F8: u32 = 0x77;
+pub const VK_F7: u32 = 0x76;
 
 impl Default for Config {
     fn default() -> Self {
@@ -155,6 +161,7 @@ impl Default for Config {
             codec: Codec::H264,
             rate_control: RateControl::Vbr,
             bitrate_mbps: 50,
+            auto_bitrate: true,
             quality: 80,
             preset: Preset::Balanced,
             fps: 60,
@@ -168,6 +175,8 @@ impl Default for Config {
             audio_bitrate_kbps: 192,
             // Alt+F9/F10 are held by the NVIDIA App overlay on most GeForce systems.
             hotkey_save_replay: Hotkey::new(VK_F10, true, true, false),
+            hotkey_save_last: Hotkey::new(VK_F7, true, true, false),
+            save_last_seconds: 30,
             hotkey_record: Hotkey::new(VK_F9, true, true, false),
             hotkey_toggle_replay: Hotkey::new(VK_F8, true, true, false),
             hotkey_overlay: Hotkey::new(0x5A, true, true, false), // Ctrl+Alt+Z
@@ -209,6 +218,7 @@ impl Config {
 
     pub fn sanitize(&mut self) {
         self.replay_seconds = self.replay_seconds.clamp(15, 20 * 60);
+        self.save_last_seconds = self.save_last_seconds.clamp(5, 20 * 60);
         self.bitrate_mbps = self.bitrate_mbps.clamp(2, 200);
         self.quality = self.quality.clamp(1, 100);
         self.fps = self.fps.clamp(15, 240);
@@ -230,6 +240,7 @@ impl Config {
             codec: self.codec,
             rate_control: self.rate_control,
             bitrate_mbps: self.bitrate_mbps,
+            auto_bitrate: self.auto_bitrate,
             quality: self.quality,
             preset: self.preset,
             fps: self.fps,
@@ -250,6 +261,8 @@ pub struct PipelineKey {
     pub codec: Codec,
     pub rate_control: RateControl,
     pub bitrate_mbps: u32,
+    /// Bitrate follows the picture size, frame rate and codec; `bitrate_mbps` is used when off.
+    pub auto_bitrate: bool,
     pub quality: u32,
     pub preset: Preset,
     pub fps: u32,
@@ -259,4 +272,41 @@ pub struct PipelineKey {
     pub mic_device: Option<String>,
     pub separate_tracks: bool,
     pub audio_bitrate_kbps: u32,
+}
+
+/// Bitrate (Mbps) that keeps a clip sharp at the given picture size and frame rate. Modern codecs
+/// need fewer bits per pixel for the same look: AV1 about half of H.264, HEVC about two thirds.
+pub fn auto_bitrate_mbps(codec: Codec, width: u32, height: u32, fps: u32) -> u32 {
+    let bits_per_pixel = match codec {
+        Codec::Av1 => 0.055,
+        Codec::Hevc => 0.08,
+        Codec::H264 => 0.12,
+    };
+    let mbps = width as f64 * height as f64 * fps as f64 * bits_per_pixel / 1_000_000.0;
+    (mbps.round() as u32).clamp(3, 120)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn auto_bitrate_scales_with_codec_and_size() {
+        let av1 = auto_bitrate_mbps(Codec::Av1, 1920, 1080, 60);
+        let hevc = auto_bitrate_mbps(Codec::Hevc, 1920, 1080, 60);
+        let h264 = auto_bitrate_mbps(Codec::H264, 1920, 1080, 60);
+        assert!(av1 < hevc && hevc < h264, "{av1} {hevc} {h264}");
+        assert!(av1 <= 8, "1080p60 AV1 must stay light, got {av1}");
+        assert!(auto_bitrate_mbps(Codec::Av1, 3840, 2160, 60) > av1 * 3);
+        assert_eq!(auto_bitrate_mbps(Codec::Av1, 640, 360, 15), 3);
+        assert_eq!(auto_bitrate_mbps(Codec::H264, 7680, 4320, 240), 120);
+    }
+
+    #[test]
+    fn old_config_without_new_fields_still_loads() {
+        let c: Config = serde_json::from_str(r#"{"replay_seconds":60,"bitrate_mbps":50}"#).unwrap();
+        assert!(c.auto_bitrate);
+        assert_eq!(c.save_last_seconds, 30);
+        assert_eq!(c.hotkey_save_last.vk, VK_F7);
+    }
 }

@@ -578,3 +578,44 @@ pub fn probe_duration(path: &Path) -> Option<f64> {
     }
     None
 }
+
+#[cfg(test)]
+mod probe_tests {
+    use super::*;
+
+    fn boxed(kind: &[u8; 4], body: &[u8]) -> Vec<u8> {
+        let mut v = ((body.len() + 8) as u32).to_be_bytes().to_vec();
+        v.extend_from_slice(kind);
+        v.extend_from_slice(body);
+        v
+    }
+
+    #[test]
+    fn probe_duration_reads_mvhd_v0_and_v1() {
+        let dir = std::env::temp_dir().join(format!("ir-probe-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // v0: version/flags, creation, modification, timescale 1000, duration 12500 -> 12.5 s
+        let mut v0 = vec![0u8; 4];
+        v0.extend_from_slice(&[0; 8]);
+        v0.extend_from_slice(&1000u32.to_be_bytes());
+        v0.extend_from_slice(&12500u32.to_be_bytes());
+        let mut file = boxed(b"ftyp", b"isom0000");
+        file.extend(boxed(b"moov", &boxed(b"mvhd", &v0)));
+        let p0 = dir.join("v0.mp4");
+        std::fs::write(&p0, &file).unwrap();
+        assert_eq!(probe_duration(&p0), Some(12.5));
+        // v1: 64-bit times, timescale 90000, duration 450000 -> 5 s
+        let mut v1 = vec![1u8, 0, 0, 0];
+        v1.extend_from_slice(&[0; 16]);
+        v1.extend_from_slice(&90000u32.to_be_bytes());
+        v1.extend_from_slice(&450000u64.to_be_bytes());
+        let mut file = boxed(b"ftyp", b"isom0000");
+        file.extend(boxed(b"moov", &boxed(b"mvhd", &v1)));
+        let p1 = dir.join("v1.mp4");
+        std::fs::write(&p1, &file).unwrap();
+        assert_eq!(probe_duration(&p1), Some(5.0));
+        std::fs::write(dir.join("junk.mp4"), b"nope").unwrap();
+        assert_eq!(probe_duration(&dir.join("junk.mp4")), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

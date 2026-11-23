@@ -80,6 +80,7 @@ pub type SharedStatus = Arc<RwLock<Status>>;
 
 pub enum Command {
     SaveReplay,
+    SaveLast,
     ToggleRecording,
     ToggleReplay,
     ApplyConfig(Box<Config>),
@@ -139,7 +140,11 @@ impl Engine {
         self.sync_pipeline();
         loop {
             match rx.recv_timeout(Duration::from_millis(250)) {
-                Ok(Command::SaveReplay) => self.save_replay(),
+                Ok(Command::SaveReplay) => self.save_replay(None),
+                Ok(Command::SaveLast) => {
+                    let n = self.config.save_last_seconds;
+                    self.save_replay(Some(n))
+                }
                 Ok(Command::ToggleRecording) => self.toggle_recording(),
                 Ok(Command::ToggleReplay) => {
                     self.config.replay_enabled = !self.config.replay_enabled;
@@ -291,7 +296,7 @@ impl Engine {
         true
     }
 
-    fn save_replay(&mut self) {
+    fn save_replay(&mut self, last: Option<u32>) {
         let Some(p) = &self.pipeline else {
             (self.notify)(Notice {
                 kind: NoticeKind::Error,
@@ -312,7 +317,7 @@ impl Engine {
             return;
         }
         let path = self.output_path("Replay");
-        let _ = p.sink_tx.send(SinkMsg::SaveReplay(path));
+        let _ = p.sink_tx.send(SinkMsg::SaveReplay(path, last));
     }
 
     fn toggle_recording(&mut self) {
@@ -352,7 +357,7 @@ enum SinkMsg {
     VideoInfo(VideoInfo),
     Video(Packet),
     SetReplay(Option<u32>),
-    SaveReplay(PathBuf),
+    SaveReplay(PathBuf, Option<u32>),
     StartRecording(PathBuf),
     StopRecording,
     Stop,
@@ -604,13 +609,14 @@ fn video_thread(
         height: 0,
         fps: cfg.fps,
         rate_control: cfg.rate_control,
-        bitrate_mbps: cfg.bitrate_mbps,
+        bitrate_mbps: 0,
         quality: cfg.quality,
         preset: cfg.preset,
     };
     let enc = loop {
         let (w, h) = fit_codec_limits(codec, out);
         settings.codec = codec;
+        settings.bitrate_mbps = if cfg.auto_bitrate { crate::config::auto_bitrate_mbps(codec, w, h, cfg.fps) } else { cfg.bitrate_mbps };
         settings.width = w;
         settings.height = h;
         match VideoEncoder::new(&gpu, &settings) {
@@ -827,7 +833,7 @@ fn sink_thread(
     let mut video_info: Option<VideoInfo> = None;
     let mut replay: Option<ReplayBuffer> = replay_secs.map(|s| ReplayBuffer::new(s, audio_infos.len()));
     let mut recorder: Option<Recorder> = None;
-    let mut pending_save: Option<(PathBuf, Instant)> = None;
+    let mut pending_save: Option<(PathBuf, Option<u32>, Instant)> = None;
     let mut last_status = Instant::now();
     let mut audio_open = true;
 
@@ -913,9 +919,9 @@ fn sink_thread(
                 (Some(s), None) => replay = Some(ReplayBuffer::new(s, audio_infos.len())),
                 (None, _) => replay = None,
             },
-            Some(Ok(SinkMsg::SaveReplay(path))) => {
+            Some(Ok(SinkMsg::SaveReplay(path, last))) => {
                 // Give the audio pipeline (≈100 ms behind) time to deliver the tail.
-                pending_save = Some((path, Instant::now() + Duration::from_millis(250)));
+                pending_save = Some((path, last, Instant::now() + Duration::from_millis(250)));
             }
             Some(Ok(SinkMsg::StartRecording(path))) => {
                 if recorder.is_none() {
@@ -936,13 +942,15 @@ fn sink_thread(
             None => {}
         }
 
-        if let Some((_, at)) = &pending_save {
+        if let Some((_, _, at)) = &pending_save {
             if Instant::now() >= *at {
-                let (path, _) = pending_save.take().unwrap();
+                let (path, last, _) = pending_save.take().unwrap();
                 match (&mut replay, &video_info) {
-                    (Some(b), Some(vi)) => match b.snapshot() {
+                    (Some(b), Some(vi)) => match b.snapshot_last(last) {
                         Some(snap) => {
-                            b.clear();
+                            if last.is_none() {
+                                b.clear(); // a full save restarts the counter; a quick save keeps the buffer
+                            }
                             let mut packets = vec![snap.video];
                             packets.extend(snap.audio);
                             let tr = tracks(vi);
@@ -1020,4 +1028,27 @@ fn save_clip(path: PathBuf, tracks: Vec<TrackKind>, packets: Vec<Vec<Packet>>, b
 #[allow(dead_code)]
 fn _path_ok(p: &Path) -> bool {
     p.parent().map(|d| d.exists()).unwrap_or(false)
+}
+
+#[cfg(test)]
+mod scan_tests {
+    use super::*;
+
+    #[test]
+    fn scan_clips_lists_newest_mp4_first_and_skips_other_files() {
+        let dir = std::env::temp_dir().join(format!("ir-scan-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a - Replay 1.mp4"), b"not a real mp4").unwrap();
+        std::thread::sleep(Duration::from_millis(30));
+        std::fs::write(dir.join("b - Recording 2.mp4"), b"x").unwrap();
+        std::fs::write(dir.join("notes.txt"), b"x").unwrap();
+        let clips = scan_clips(&dir, 5);
+        assert_eq!(clips.len(), 2);
+        assert!(clips[0].path.ends_with("b - Recording 2.mp4") && !clips[0].is_replay);
+        assert!(clips[1].is_replay);
+        assert_eq!(clips[1].secs, 0.0); // unreadable mp4: duration unknown, clip still listed
+        assert_eq!(scan_clips(&dir, 1).len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

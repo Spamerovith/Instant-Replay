@@ -13,19 +13,21 @@ use crate::config::Hotkey;
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Action {
     SaveReplay,
+    SaveLast,
     ToggleRecording,
     ToggleReplay,
     ToggleOverlay,
 }
 
 impl Action {
-    pub const ALL: [Action; 4] = [Action::SaveReplay, Action::ToggleRecording, Action::ToggleReplay, Action::ToggleOverlay];
+    pub const ALL: [Action; 5] = [Action::SaveReplay, Action::SaveLast, Action::ToggleRecording, Action::ToggleReplay, Action::ToggleOverlay];
     fn id(self) -> i32 {
         match self {
             Action::SaveReplay => 1,
             Action::ToggleRecording => 2,
             Action::ToggleReplay => 3,
             Action::ToggleOverlay => 4,
+            Action::SaveLast => 5,
         }
     }
     fn from_id(id: i32) -> Option<Action> {

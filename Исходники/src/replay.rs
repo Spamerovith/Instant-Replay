@@ -110,8 +110,14 @@ impl ReplayBuffer {
 
     /// Copies the last `max` seconds (cheap: packet data is reference-counted).
     pub fn snapshot(&self) -> Option<Snapshot> {
+        self.snapshot_last(None)
+    }
+
+    /// Like `snapshot`, but only the last `secs` seconds (never more than the buffer holds).
+    pub fn snapshot_last(&self, secs: Option<u32>) -> Option<Snapshot> {
         let latest = self.video.back()?.pts;
-        let want = latest - self.max_hns;
+        let window = secs.map_or(self.max_hns, |s| (s as i64 * HNS).min(self.max_hns));
+        let want = latest - window;
         // Latest keyframe at or before the window start; otherwise the oldest one we have.
         let start = self
             .key_pts
@@ -158,5 +164,23 @@ mod tests {
         let dur = (s.video.last().unwrap().pts - s.base_pts) as f64 / HNS as f64;
         assert!(dur >= 15.0 && dur < 17.1, "clip {dur}");
         assert!(s.audio[0].first().unwrap().pts >= s.base_pts);
+    }
+
+    #[test]
+    fn snapshot_last_takes_only_the_tail() {
+        let mut b = ReplayBuffer::new(60, 1);
+        for i in 0..3600i64 {
+            let pts = i * HNS / 60;
+            b.push_video(pkt(pts, i % 120 == 0));
+            b.push_audio(0, pkt(pts, true));
+        }
+        let s = b.snapshot_last(Some(10)).unwrap();
+        let dur = (s.video.last().unwrap().pts - s.base_pts) as f64 / HNS as f64;
+        assert!(s.video[0].key);
+        assert!(dur >= 10.0 && dur < 12.1, "clip {dur}");
+        // Asking for more than the buffer holds gives the whole buffer; the buffer is untouched.
+        let all = b.snapshot_last(Some(500)).unwrap();
+        assert_eq!(all.video.len(), b.snapshot().unwrap().video.len());
+        assert!(b.buffered_secs() >= 59.0);
     }
 }
