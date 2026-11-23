@@ -331,10 +331,11 @@ impl Engine {
     }
 
     fn output_path(&self, kind: &str) -> PathBuf {
-        let dir = self.config.output_dir.clone();
-        let _ = std::fs::create_dir_all(&dir);
         let label = self.pipeline.as_ref().map(|p| p.label.clone()).unwrap_or_else(|| "Desktop".into());
-        let base = format!("{} - {} {}", util::sanitize_file_name(&label), kind, util::timestamp_for_file());
+        let window_source = matches!(self.config.source, crate::config::CaptureSource::Window { .. });
+        let foreground = if self.config.game_folders && !window_source { sources::foreground_program() } else { None };
+        let (dir, base) = clip_location(&self.config.output_dir, self.config.game_folders, window_source, &label, foreground.as_deref(), kind, &util::timestamp_for_file());
+        let _ = std::fs::create_dir_all(&dir);
         let mut p = dir.join(format!("{base}.mp4"));
         let mut i = 2;
         while p.exists() {
@@ -852,20 +853,33 @@ struct Recorder {
     base: i64,
 }
 
-/// The newest `n` clips in the output folder (all time, not just this session).
-pub fn scan_clips(dir: &std::path::Path, n: usize) -> Vec<ClipInfo> {
-    let Ok(rd) = std::fs::read_dir(dir) else { return Vec::new() };
-    let mut files: Vec<(std::time::SystemTime, PathBuf, u64)> = rd
-        .flatten()
-        .filter_map(|e| {
-            let p = e.path();
-            if !p.extension().map(|x| x.eq_ignore_ascii_case("mp4")).unwrap_or(false) {
-                return None;
+/// Adds the `.mp4` files of one folder to `out`.
+fn collect_mp4(dir: &std::path::Path, out: &mut Vec<(std::time::SystemTime, PathBuf, u64)>) {
+    let Ok(rd) = std::fs::read_dir(dir) else { return };
+    for e in rd.flatten() {
+        let p = e.path();
+        if !p.extension().map(|x| x.eq_ignore_ascii_case("mp4")).unwrap_or(false) {
+            continue;
+        }
+        if let Ok(m) = e.metadata() {
+            if m.is_file() {
+                out.push((m.modified().unwrap_or(std::time::UNIX_EPOCH), p, m.len()));
             }
-            let m = e.metadata().ok()?;
-            m.is_file().then(|| (m.modified().unwrap_or(std::time::UNIX_EPOCH), p, m.len()))
-        })
-        .collect();
+        }
+    }
+}
+
+/// The newest `n` clips of the output folder and of its game folders (all time, not just this session).
+pub fn scan_clips(dir: &std::path::Path, n: usize) -> Vec<ClipInfo> {
+    let mut files = Vec::new();
+    collect_mp4(dir, &mut files);
+    if let Ok(rd) = std::fs::read_dir(dir) {
+        for e in rd.flatten() {
+            if e.metadata().map(|m| m.is_dir()).unwrap_or(false) {
+                collect_mp4(&e.path(), &mut files);
+            }
+        }
+    }
     files.sort_by(|a, b| b.0.cmp(&a.0));
     files
         .into_iter()
@@ -1192,5 +1206,63 @@ mod filter_tests {
         let games = clip_games(&clips);
         assert_eq!(games[0], ("Bionic".to_string(), 2));
         assert_eq!(games.len(), 3); // "random" has no source in its name
+    }
+}
+
+/// Folder and base file name of a new clip. With game folders on, the clip goes into a folder named
+/// after the game: the captured window's program, or, when the whole monitor is captured, the
+/// program in the foreground (the desktop if there is none).
+pub fn clip_location(root: &Path, game_folders: bool, window_source: bool, label: &str, foreground: Option<&str>, kind: &str, stamp: &str) -> (PathBuf, String) {
+    let game = if game_folders && !window_source { foreground.unwrap_or(label) } else { label };
+    let game = util::sanitize_file_name(game);
+    let dir = if game_folders { root.join(&game) } else { root.to_path_buf() };
+    (dir, format!("{game} - {kind} {stamp}"))
+}
+
+#[cfg(test)]
+mod location_tests {
+    use super::*;
+
+    #[test]
+    fn monitor_capture_is_named_after_the_foreground_game() {
+        let root = Path::new("D:/clips");
+        let (dir, base) = clip_location(root, true, false, "Desktop", Some("Bionic"), "Replay", "2026-11-23 12-00-00");
+        assert_eq!(dir, root.join("Bionic"));
+        assert_eq!(base, "Bionic - Replay 2026-11-23 12-00-00");
+        let (dir, base) = clip_location(root, true, false, "Desktop", None, "Recording", "t");
+        assert_eq!((dir, base.as_str()), (root.join("Desktop"), "Desktop - Recording t"));
+    }
+
+    #[test]
+    fn window_capture_keeps_its_own_name_and_flat_mode_has_no_folders() {
+        let root = Path::new("D:/clips");
+        let (dir, base) = clip_location(root, true, true, "cs2", Some("chrome"), "Replay", "t");
+        assert_eq!((dir, base.as_str()), (root.join("cs2"), "cs2 - Replay t"));
+        let (dir, base) = clip_location(root, false, false, "Desktop", Some("Bionic"), "Replay", "t");
+        assert_eq!((dir, base.as_str()), (root.to_path_buf(), "Desktop - Replay t"));
+        // Characters that cannot be in a folder name are cleaned.
+        let (dir, _) = clip_location(root, true, false, "Desktop", Some("a/b:c"), "Replay", "t");
+        assert_eq!(dir, root.join("a b c"));
+    }
+}
+
+#[cfg(test)]
+mod scan_folder_tests {
+    use super::*;
+
+    #[test]
+    fn scan_finds_clips_in_game_folders_too() {
+        let dir = std::env::temp_dir().join(format!("ir-scan-games-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("Bionic")).unwrap();
+        std::fs::create_dir_all(dir.join("Bionic").join("deeper")).unwrap();
+        std::fs::write(dir.join("Desktop - Replay 1.mp4"), b"x").unwrap();
+        std::thread::sleep(Duration::from_millis(30));
+        std::fs::write(dir.join("Bionic").join("Bionic - Replay 2.mp4"), b"x").unwrap();
+        std::fs::write(dir.join("Bionic").join("deeper").join("Too - Replay 3.mp4"), b"x").unwrap();
+        let clips = scan_clips(&dir, 10);
+        assert_eq!(clips.len(), 2, "one level of game folders only");
+        assert!(clips[0].path.ends_with("Bionic - Replay 2.mp4"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

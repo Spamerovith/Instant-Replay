@@ -141,6 +141,8 @@ pub struct Config {
     pub close_to_tray: bool,
     pub notify_overlay: bool,
     pub notify_sound: bool,
+    /// Clips go into a folder named after the game (like the NVIDIA overlay does).
+    pub game_folders: bool,
 
     /// Interface language ("ru" / "en" / "uk"); `None` until the first-run choice.
     pub language: Option<String>,
@@ -191,6 +193,7 @@ impl Default for Config {
             close_to_tray: true,
             notify_overlay: true,
             notify_sound: true,
+            game_folders: true,
             language: None,
             skip_version: String::new(),
             profiles: Vec::new(),

@@ -166,3 +166,53 @@ pub fn resolve(src: &CaptureSource) -> Option<(Target, String)> {
         }
     }
 }
+
+/// `game.exe` becomes `game`; `None` for the desktop shell and system surfaces, which are not a game.
+pub fn program_name(exe: &str) -> Option<String> {
+    const SHELL: [&str; 9] = [
+        "explorer.exe",
+        "shellexperiencehost.exe",
+        "searchhost.exe",
+        "searchapp.exe",
+        "startmenuexperiencehost.exe",
+        "lockapp.exe",
+        "textinputhost.exe",
+        "applicationframehost.exe",
+        "dwm.exe",
+    ];
+    if exe.is_empty() || SHELL.iter().any(|s| exe.eq_ignore_ascii_case(s)) {
+        return None;
+    }
+    let name = exe.strip_suffix(".exe").or_else(|| exe.strip_suffix(".EXE")).unwrap_or(exe);
+    Some(name.to_string())
+}
+
+/// The program in the foreground (a game, normally), not counting this app and the desktop shell.
+/// Its name comes from the system process snapshot: no handle to the program is opened.
+pub fn foreground_program() -> Option<String> {
+    unsafe {
+        let h = GetForegroundWindow();
+        if h.is_invalid() {
+            return None;
+        }
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(h, Some(&mut pid));
+        if pid == 0 || pid == std::process::id() {
+            return None;
+        }
+        program_name(process_names().get(&pid)?)
+    }
+}
+
+#[cfg(test)]
+mod program_tests {
+    use super::*;
+
+    #[test]
+    fn program_names_skip_the_shell() {
+        assert_eq!(program_name("Bionic.exe").as_deref(), Some("Bionic"));
+        assert_eq!(program_name("cs2.EXE").as_deref(), Some("cs2"));
+        assert_eq!(program_name("Explorer.EXE"), None);
+        assert_eq!(program_name(""), None);
+    }
+}

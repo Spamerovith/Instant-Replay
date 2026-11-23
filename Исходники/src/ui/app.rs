@@ -1360,6 +1360,13 @@ impl App {
                     util::open_in_explorer(&self.cfg.output_dir, false);
                 }
             });
+            g.row(
+                tr!("Папки по играм", "Folders by game", "Теки за іграми"),
+                Some(tr!("Клип кладётся в папку с названием игры, как в NVIDIA", "A clip goes into a folder named after the game, like NVIDIA does", "Кліп кладеться в теку з назвою гри, як у NVIDIA")),
+                |ui| {
+                    w::switch(ui, &mut self.cfg.game_folders, tr!("Папки по играм", "Folders by game", "Теки за іграми"));
+                },
+            );
         });
         ui.add_space(space::S24);
         w::group(ui, Some(tr!("Запуск", "Startup", "Запуск")), |g| {
