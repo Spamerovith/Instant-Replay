@@ -317,6 +317,9 @@ pub struct App {
     /// Clip waiting for the delete confirmation, and the error of the last attempt.
     delete_pending: Option<std::path::PathBuf>,
     delete_error: Option<String>,
+    /// Preview pictures of clips: asked for once, `None` until ready (or when none could be made).
+    thumbs: crate::thumbs::Thumbs,
+    thumb_tex: std::collections::HashMap<std::path::PathBuf, Option<egui::TextureHandle>>,
     update: Option<Arc<parking_lot::Mutex<Option<crate::update::Release>>>>,
     update_done: Arc<AtomicBool>,
     update_at: Instant,
@@ -363,6 +366,8 @@ impl App {
             overlay_clips_at: None,
             delete_pending: None,
             delete_error: None,
+            thumbs: crate::thumbs::Thumbs::start(cc.egui_ctx.clone()),
+            thumb_tex: std::collections::HashMap::new(),
             update: None,
             update_done: Arc::new(AtomicBool::new(false)),
             update_at: Instant::now() - Duration::from_secs(48 * 3600),
@@ -440,6 +445,7 @@ impl eframe::App for App {
             self.cfg.replay_enabled = status.replay_enabled;
         }
 
+        self.poll_thumbs(ctx);
         self.poll_hotkey_capture(ctx);
 
         if let Some(t) = self.hide_at {
@@ -857,6 +863,7 @@ impl App {
             });
         });
         ui.add_space(space::S8 - ui.spacing().item_spacing.y);
+        let recent_tex: Vec<Option<egui::TextureId>> = st.recent.iter().map(|c| self.thumb_for(c)).collect();
         let mut open_clip: Option<std::path::PathBuf> = None;
         let mut delete_req: Option<std::path::PathBuf> = None;
         w::group(ui, None, |g| {
@@ -865,18 +872,18 @@ impl App {
                     w::value_text(ui, &trf!(["{} или {}", "{} or {}", "{} або {}"], hotkeys::describe(&self.cfg.hotkey_save_replay), hotkeys::describe(&self.cfg.hotkey_record)));
                 });
             }
-            for clip in st.recent.iter() {
+            for (clip, tex) in st.recent.iter().zip(recent_tex.iter()) {
                 let name = clip.path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
                 let meta = format!("{} · {}", util::format_duration(clip.secs), util::format_bytes(clip.bytes));
                 let path = clip.path.clone();
-                g.custom(size::ROW_MIN, |ui| {
+                g.custom(size::ROW_MIN + 14.0, |ui| {
                     let row = ui.max_rect();
                     let resp = ui.interact(row, egui::Id::new(("clip", &path)), egui::Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
                     let h = ui.ctx().animate_bool_with_time(resp.id, resp.hovered(), w::dur(theme::motion::HOVER));
                     if h > 0.0 {
                         ui.painter().rect_filled(row.expand2(vec2(space::S8, -4.0)), Rounding::same(radius::INPUT), w::lerp_color(Color32::TRANSPARENT, color::SURFACE_HOVER, h));
                     }
-                    ui.label(RichText::new(if clip.is_replay { glyph::FILM } else { glyph::VIDEO }).font(theme::icon(14.0)).color(color::TEXT_SECONDARY));
+                    clip_thumb(ui, *tex, clip.is_replay, vec2(80.0, 45.0));
                     ui.add(egui::Label::new(RichText::new(&name).font(theme::body()).color(color::TEXT)).truncate());
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         w::value_text(ui, &meta);
@@ -1500,9 +1507,11 @@ impl App {
                 let tile_w = ((avail - space::S8 * 2.0) / 3.0).floor();
                 let mut picked: Option<std::path::PathBuf> = None;
                 let mut delete_req: Option<std::path::PathBuf> = None;
+                let clips_now = self.overlay_clips.clone();
+                let tile_tex: Vec<Option<egui::TextureId>> = clips_now.iter().map(|c| self.thumb_for(c)).collect();
                 ui.horizontal(|ui| {
-                    for clip in self.overlay_clips.iter() {
-                        let resp = gallery_tile(ui, clip, tile_w);
+                    for (clip, tex) in self.overlay_clips.iter().zip(tile_tex.iter()) {
+                        let resp = gallery_tile(ui, clip, tile_w, *tex);
                         if resp.clicked() {
                             picked = Some(clip.path.clone());
                         }
@@ -1615,21 +1624,44 @@ fn overlay_row(ui: &mut Ui, g: &str, title: &str, sub: Option<&str>, control: im
     resp.clicked()
 }
 
-fn gallery_tile(ui: &mut Ui, clip: &crate::engine::ClipInfo, tile_w: f32) -> egui::Response {
+fn gallery_tile(ui: &mut Ui, clip: &crate::engine::ClipInfo, tile_w: f32, tex: Option<egui::TextureId>) -> egui::Response {
     let (rect, resp) = ui.allocate_exact_size(vec2(tile_w, size::OVERLAY_TILE_H), egui::Sense::click());
     let name = clip.path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
     let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(name);
     let hover = ui.ctx().animate_bool_with_time(resp.id, resp.hovered(), w::dur(theme::motion::HOVER));
-    let fill = w::lerp_color(color::SURFACE_RAISED, color::SURFACE_HOVER, hover);
-    let p = ui.painter();
-    p.rect_filled(rect, Rounding::same(radius::INPUT), fill);
-    p.text(rect.center() - vec2(0.0, 4.0), egui::Align2::CENTER_CENTER, if clip.is_replay { glyph::HISTORY } else { glyph::VIDEO }, theme::icon(18.0), color::TEXT_SECONDARY);
-    let dur = util::format_duration(clip.secs);
-    let g = ui.fonts(|f| f.layout_no_wrap(dur, theme::caption(), Color32::PLACEHOLDER));
-    let pill = egui::Rect::from_min_size(rect.min + vec2(6.0, 6.0), g.size() + vec2(10.0, 4.0));
-    p.rect_filled(pill, Rounding::same(radius::PILL), Color32::from_black_alpha(180));
-    p.galley(pill.min + vec2(5.0, 2.0), g, color::TEXT);
-    p.text(egui::pos2(rect.center().x, rect.bottom() - 8.0), egui::Align2::CENTER_BOTTOM, util::format_bytes(clip.bytes), theme::caption(), color::TEXT_SECONDARY);
+    let rounding = Rounding::same(radius::INPUT);
+    match tex {
+        Some(id) => {
+            // The 16:9 picture fills the tile; the sides that do not fit are cropped.
+            let want = tile_w / size::OVERLAY_TILE_H;
+            let have = crate::thumbs::W as f32 / crate::thumbs::H as f32;
+            let uv = if want < have {
+                let k = want / have;
+                egui::Rect::from_min_max(egui::pos2((1.0 - k) / 2.0, 0.0), egui::pos2((1.0 + k) / 2.0, 1.0))
+            } else {
+                let k = have / want;
+                egui::Rect::from_min_max(egui::pos2(0.0, (1.0 - k) / 2.0), egui::pos2(1.0, (1.0 + k) / 2.0))
+            };
+            let tint = w::lerp_color(Color32::from_gray(205), Color32::WHITE, hover);
+            egui::Image::new(egui::load::SizedTexture::new(id, rect.size())).uv(uv).rounding(rounding).tint(tint).paint_at(ui, rect);
+        }
+        None => {
+            let fill = w::lerp_color(color::SURFACE_RAISED, color::SURFACE_HOVER, hover);
+            ui.painter().rect_filled(rect, rounding, fill);
+            ui.painter().text(rect.center() - vec2(0.0, 4.0), egui::Align2::CENTER_CENTER, if clip.is_replay { glyph::HISTORY } else { glyph::VIDEO }, theme::icon(18.0), color::TEXT_SECONDARY);
+        }
+    }
+    let pill_text = |ui: &mut Ui, at: egui::Pos2, align_right: bool, text: String| {
+        let g = ui.fonts(|f| f.layout_no_wrap(text, theme::caption(), Color32::PLACEHOLDER));
+        let size = g.size() + vec2(10.0, 4.0);
+        let min = if align_right { egui::pos2(at.x - size.x, at.y - size.y) } else { at };
+        let pill = egui::Rect::from_min_size(min, size);
+        let p = ui.painter();
+        p.rect_filled(pill, Rounding::same(radius::PILL), Color32::from_black_alpha(180));
+        p.galley(pill.min + vec2(5.0, 2.0), g, color::TEXT);
+    };
+    pill_text(ui, rect.min + vec2(6.0, 6.0), false, util::format_duration(clip.secs));
+    pill_text(ui, rect.right_bottom() - vec2(6.0, 6.0), true, util::format_bytes(clip.bytes));
     resp
 }
 
@@ -1697,10 +1729,12 @@ impl App {
             });
         });
         if confirm {
+            crate::thumbs::forget(&path); // needs the file to find its picture: before it goes away
             match crate::recycle::recycle(&path) {
                 Ok(()) => {
                     self.engine.status.write().recent.retain(|c| c.path != path);
                     self.overlay_clips.retain(|c| c.path != path);
+                    self.thumb_tex.remove(&path);
                     self.overlay_clips_at = None;
                     self.delete_pending = None;
                     self.delete_error = None;
@@ -1867,4 +1901,44 @@ fn set_transitions(hwnd: isize, enabled: bool) {
     unsafe {
         let _ = DwmSetWindowAttribute(HWND(hwnd as _), DWMWINDOWATTRIBUTE(DWMWA_TRANSITIONS_FORCEDISABLED), &disabled as *const u32 as *const _, 4);
     }
+}
+
+// ------------------------------------------------------------------ clip previews
+
+impl App {
+    /// Turns finished preview pictures into textures.
+    fn poll_thumbs(&mut self, ctx: &egui::Context) {
+        for (path, pic) in self.thumbs.finished() {
+            let tex = pic.map(|rgba| {
+                let img = egui::ColorImage::from_rgba_unmultiplied([crate::thumbs::W, crate::thumbs::H], &rgba);
+                ctx.load_texture(format!("thumb:{}", path.display()), img, egui::TextureOptions::LINEAR)
+            });
+            self.thumb_tex.insert(path, tex);
+        }
+    }
+
+    /// Texture of a clip's preview; the first call asks for it to be made in the background.
+    fn thumb_for(&mut self, clip: &crate::engine::ClipInfo) -> Option<egui::TextureId> {
+        if !self.thumb_tex.contains_key(&clip.path) {
+            self.thumb_tex.insert(clip.path.clone(), None);
+            self.thumbs.request(clip.path.clone(), clip.secs, clip.is_replay);
+        }
+        self.thumb_tex.get(&clip.path).and_then(|t| t.as_ref()).map(|t| t.id())
+    }
+}
+
+/// A clip's preview in a list row (a film icon on a plain tile while it is being made).
+fn clip_thumb(ui: &mut Ui, tex: Option<egui::TextureId>, is_replay: bool, size: egui::Vec2) {
+    let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+    let rounding = Rounding::same(radius::INPUT);
+    match tex {
+        Some(id) => {
+            egui::Image::new(egui::load::SizedTexture::new(id, size)).rounding(rounding).paint_at(ui, rect);
+        }
+        None => {
+            ui.painter().rect_filled(rect, rounding, color::SURFACE_RAISED);
+            ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, if is_replay { glyph::FILM } else { glyph::VIDEO }, theme::icon(16.0), color::TEXT_SECONDARY);
+        }
+    }
+    ui.add_space(space::S4);
 }

@@ -18,6 +18,7 @@ mod player;
 mod recycle;
 mod replay;
 mod sound;
+mod thumbs;
 mod tools;
 mod tray;
 mod update;
