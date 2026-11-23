@@ -94,6 +94,16 @@ impl ReplayBuffer {
         }
     }
 
+    /// Empties the buffer (after a save the counter starts again from zero).
+    pub fn clear(&mut self) {
+        self.video.clear();
+        self.key_pts.clear();
+        for q in &mut self.audio {
+            q.clear();
+        }
+        self.bytes = 0;
+    }
+
     pub fn bytes(&self) -> usize {
         self.bytes
     }

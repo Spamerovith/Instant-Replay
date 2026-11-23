@@ -22,9 +22,8 @@ pub struct UiShared {
     pub quitting: AtomicBool,
     pub overlay_request: AtomicBool,
     pub in_overlay: AtomicBool,
-    /// Work area (px) of the monitor showing the game when the overlay was requested.
-    pub overlay_target: parking_lot::Mutex<Option<(i32, i32, i32, i32)>>,
-    pub overlay_was_visible: AtomicBool,
+    /// Window state before the overlay took the window over; restored exactly when it closes.
+    overlay_saved: parking_lot::Mutex<Option<OverlaySaved>>,
 }
 
 impl UiShared {
@@ -35,8 +34,7 @@ impl UiShared {
             quitting: AtomicBool::new(false),
             overlay_request: AtomicBool::new(false),
             in_overlay: AtomicBool::new(false),
-            overlay_target: parking_lot::Mutex::new(None),
-            overlay_was_visible: AtomicBool::new(visible),
+            overlay_saved: parking_lot::Mutex::new(None),
         })
     }
 
@@ -59,23 +57,145 @@ impl UiShared {
         self.visible.store(true, Ordering::SeqCst);
     }
 
-    /// Called from the hotkey thread: remember where the game is and bring the window up.
+    /// Called from the hotkey thread: turns the window into the overlay right away, so the
+    /// regular program window never shows up in its usual place.
     pub fn request_overlay(&self) {
-        use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTOPRIMARY};
-        use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
-        if !self.in_overlay.load(Ordering::SeqCst) {
-            unsafe {
-                let mon = MonitorFromWindow(GetForegroundWindow(), MONITOR_DEFAULTTOPRIMARY);
-                let mut mi = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
-                if GetMonitorInfoW(mon, &mut mi).as_bool() {
-                    let r = mi.rcWork;
-                    *self.overlay_target.lock() = Some((r.left, r.top, r.right, r.bottom));
-                }
-            }
-            self.overlay_was_visible.store(self.visible.load(Ordering::SeqCst), Ordering::SeqCst);
-            self.show();
+        if !self.in_overlay.load(Ordering::SeqCst) && self.overlay_saved.lock().is_none() {
+            self.place_as_overlay();
         }
         self.overlay_request.store(true, Ordering::SeqCst);
+    }
+
+    /// Remembers the window state (hidden / minimized / maximized / normal, its place and the
+    /// game window), then puts the window at the right edge of the game's monitor, frameless and
+    /// on top. Done with Win32 directly: the window must not appear at its usual size first.
+    fn place_as_overlay(&self) {
+        use windows::Win32::Foundation::{HWND, RECT};
+        use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTOPRIMARY};
+        use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
+        use windows::Win32::UI::WindowsAndMessaging::*;
+        let h = self.hwnd.load(Ordering::SeqCst);
+        if h == 0 {
+            return;
+        }
+        unsafe {
+            let hwnd = HWND(h as _);
+            let fg = GetForegroundWindow();
+            let mon = MonitorFromWindow(fg, MONITOR_DEFAULTTOPRIMARY);
+            let mut mi = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
+            if !GetMonitorInfoW(mon, &mut mi).as_bool() {
+                return;
+            }
+            let (mut dpi, mut dpi_y) = (96u32, 96u32);
+            if GetDpiForMonitor(mon, MDT_EFFECTIVE_DPI, &mut dpi, &mut dpi_y).is_err() {
+                dpi = 96;
+            }
+            let work = mi.rcWork;
+            let w = (size::OVERLAY_W * dpi.max(96) as f32 / 96.0).round() as i32;
+            let rect = RECT { left: work.right - w, top: work.top, right: work.right, bottom: work.bottom };
+
+            let mut wp = WINDOWPLACEMENT { length: std::mem::size_of::<WINDOWPLACEMENT>() as u32, ..Default::default() };
+            let _ = GetWindowPlacement(hwnd, &mut wp);
+            let style = GetWindowLongPtrW(hwnd, GWL_STYLE);
+            *self.overlay_saved.lock() = Some(OverlaySaved {
+                placement: wp,
+                style,
+                hidden: !self.visible.load(Ordering::SeqCst),
+                prev_fg: fg.0 as isize,
+            });
+
+            // The frame is removed here and not through egui's `Decorations`: any winit
+            // window-flag change re-applies its own idea of visibility and would show the
+            // program window again after the overlay closes.
+            SetWindowLongPtrW(hwnd, GWL_STYLE, style & !OVERLAY_FRAME);
+            if IsIconic(hwnd).as_bool() || IsZoomed(hwnd).as_bool() {
+                // Leave the minimized / maximized state straight into the overlay rectangle
+                // (rcNormalPosition is in workspace coordinates; SetWindowPos below fixes any offset).
+                let (ox, oy) = (work.left - mi.rcMonitor.left, work.top - mi.rcMonitor.top);
+                let mut ov = wp;
+                ov.flags = WINDOWPLACEMENT_FLAGS(0);
+                ov.showCmd = SW_SHOWNOACTIVATE.0 as u32;
+                ov.rcNormalPosition = RECT { left: rect.left - ox, top: rect.top - oy, right: rect.right - ox, bottom: rect.bottom - oy };
+                let _ = SetWindowPlacement(hwnd, &ov);
+            }
+            // SWP_NOSENDCHANGING skips the 840 px minimum width of the regular window.
+            let _ = SetWindowPos(
+                hwnd,
+                HWND_TOPMOST,
+                rect.left,
+                rect.top,
+                w,
+                rect.bottom - rect.top,
+                SWP_NOSENDCHANGING | SWP_FRAMECHANGED | SWP_SHOWWINDOW | SWP_NOACTIVATE,
+            );
+            let _ = SetForegroundWindow(hwnd);
+        }
+        self.visible.store(true, Ordering::SeqCst);
+    }
+
+    /// Puts the window back exactly as it was before the overlay. With `open_full` the regular
+    /// window is shown and focused; otherwise a hidden window is hidden again, a minimized one is
+    /// minimized again and an open one goes back behind the game, which gets the focus back.
+    fn restore_after_overlay(&self, open_full: bool) {
+        use windows::Win32::Foundation::HWND;
+        use windows::Win32::UI::WindowsAndMessaging::*;
+        let Some(s) = self.overlay_saved.lock().take() else { return };
+        let h = self.hwnd.load(Ordering::SeqCst);
+        if h == 0 {
+            return;
+        }
+        unsafe {
+            let hwnd = HWND(h as _);
+            let prev_fg = HWND(s.prev_fg as _);
+            let mut wp = s.placement;
+            let was_min = wp.showCmd == SW_SHOWMINIMIZED.0 as u32;
+            let was_max = wp.showCmd == SW_SHOWMAXIMIZED.0 as u32 || (was_min && (wp.flags.0 & WPF_RESTORETOMAXIMIZED.0) != 0);
+            if !open_full {
+                // Give the focus back to the game while we still own it.
+                if !prev_fg.is_invalid() && prev_fg != hwnd && GetForegroundWindow() == hwnd {
+                    let _ = SetForegroundWindow(prev_fg);
+                }
+                if s.hidden {
+                    let _ = ShowWindow(hwnd, SW_HIDE);
+                }
+            }
+            // Frame back first, then the old placement: it restores the outer rectangle.
+            let cur = GetWindowLongPtrW(hwnd, GWL_STYLE);
+            SetWindowLongPtrW(hwnd, GWL_STYLE, (cur & !OVERLAY_FRAME) | (s.style & OVERLAY_FRAME));
+            let _ = SetWindowPos(
+                hwnd,
+                HWND_NOTOPMOST,
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+            );
+            if open_full {
+                wp.showCmd = if was_max { SW_SHOWMAXIMIZED.0 } else { SW_SHOWNORMAL.0 } as u32;
+                let _ = SetWindowPlacement(hwnd, &wp);
+                let _ = SetForegroundWindow(hwnd);
+                self.visible.store(true, Ordering::SeqCst);
+                return;
+            }
+            if s.hidden {
+                wp.showCmd = SW_HIDE.0 as u32;
+                let _ = SetWindowPlacement(hwnd, &wp);
+                self.visible.store(false, Ordering::SeqCst);
+            } else if was_min {
+                wp.showCmd = SW_SHOWMINNOACTIVE.0 as u32;
+                let _ = SetWindowPlacement(hwnd, &wp);
+            } else {
+                wp.showCmd = if was_max { SW_SHOWMAXIMIZED.0 } else { SW_SHOWNOACTIVATE.0 } as u32;
+                let _ = SetWindowPlacement(hwnd, &wp);
+                // Back behind the game, not on top of it.
+                let fg = GetForegroundWindow();
+                let behind = if !fg.is_invalid() && fg != hwnd { fg } else { prev_fg };
+                if !behind.is_invalid() && behind != hwnd && (GetWindowLongPtrW(behind, GWL_EXSTYLE) & WS_EX_TOPMOST.0 as isize) == 0 {
+                    let _ = SetWindowPos(hwnd, behind, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+                }
+            }
+        }
     }
 
     /// Keeps the overlay out of screen capture (it is never recorded).
@@ -102,6 +222,18 @@ impl UiShared {
     }
 }
 
+/// Style bits of the regular window frame that the overlay goes without.
+const OVERLAY_FRAME: isize = (windows::Win32::UI::WindowsAndMessaging::WS_CAPTION.0 | windows::Win32::UI::WindowsAndMessaging::WS_THICKFRAME.0) as isize;
+
+#[derive(Clone, Copy)]
+struct OverlaySaved {
+    placement: windows::Win32::UI::WindowsAndMessaging::WINDOWPLACEMENT,
+    /// Window style before the frame was taken off.
+    style: isize,
+    hidden: bool,
+    prev_fg: isize,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Page {
     Home,
@@ -126,9 +258,6 @@ const FPS_STEPS: [u32; 6] = [30, 60, 120, 144, 165, 240];
 const AUDIO_BITRATES: [u32; 3] = [128, 160, 192];
 
 struct OverlayMode {
-    was_visible: bool,
-    prev_inner: Option<egui::Rect>,
-    prev_outer: Option<egui::Rect>,
     focused: bool,
     opened: Instant,
 }
@@ -154,6 +283,9 @@ pub struct App {
     /// Встроенный плеер открытого клипа (если JustView не найден).
     viewer: Option<Viewer>,
     viewer_prefs: ViewerPrefs,
+    /// Newest clips on disk for the overlay gallery (all time).
+    overlay_clips: Vec<crate::engine::ClipInfo>,
+    overlay_clips_at: Option<Instant>,
     update: Option<Arc<parking_lot::Mutex<Option<crate::update::Release>>>>,
     update_done: Arc<AtomicBool>,
     update_at: Instant,
@@ -196,6 +328,8 @@ impl App {
             overlay: None,
             viewer: None,
             viewer_prefs: ViewerPrefs::default(),
+            overlay_clips: Vec::new(),
+            overlay_clips_at: None,
             update: None,
             update_done: Arc::new(AtomicBool::new(false)),
             update_at: Instant::now() - Duration::from_secs(48 * 3600),
@@ -1190,41 +1324,23 @@ fn estimate_memory(cfg: &Config) -> String {
 
 impl App {
     fn enter_overlay(&mut self, ctx: &egui::Context) {
-        let ppp = ctx.pixels_per_point();
-        let (_l, t, r, b) = self.shared.overlay_target.lock().take().unwrap_or((0, 0, 1920, 1040));
-        let w = size::OVERLAY_W;
-        let (prev_inner, prev_outer) = ctx.input(|i| (i.viewport().inner_rect, i.viewport().outer_rect));
-        let was_visible = self.shared.overlay_was_visible.load(Ordering::SeqCst);
-        self.overlay = Some(OverlayMode { was_visible, prev_inner, prev_outer, focused: false, opened: Instant::now() });
+        // The window was already moved, resized and put on top by `UiShared::place_as_overlay`.
+        self.overlay = Some(OverlayMode { focused: false, opened: Instant::now() });
+        self.overlay_clips_at = None;
         self.shared.in_overlay.store(true, Ordering::SeqCst);
         self.shared.exclude_from_capture(true);
-        ctx.send_viewport_cmd(egui::ViewportCommand::MinInnerSize(vec2(w, 300.0)));
-        ctx.send_viewport_cmd(egui::ViewportCommand::Decorations(false));
-        ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(egui::WindowLevel::AlwaysOnTop));
-        ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(vec2(w, (b - t) as f32 / ppp)));
-        ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(r as f32 / ppp - w, t as f32 / ppp)));
         ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
     }
 
     /// Leaves overlay mode. `open_full` keeps the regular window open afterwards.
     fn exit_overlay(&mut self, ctx: &egui::Context, open_full: bool) {
-        let Some(ov) = self.overlay.take() else { return };
+        if self.overlay.take().is_none() {
+            return;
+        }
         self.shared.in_overlay.store(false, Ordering::SeqCst);
         self.shared.exclude_from_capture(false);
-        ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(egui::WindowLevel::Normal));
-        ctx.send_viewport_cmd(egui::ViewportCommand::Decorations(true));
-        ctx.send_viewport_cmd(egui::ViewportCommand::MinInnerSize(vec2(840.0, 560.0)));
-        let inner = ov.prev_inner.filter(|r| r.width() >= 840.0).map(|r| r.size()).unwrap_or(vec2(980.0, 700.0));
-        ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(inner));
-        if let Some(o) = ov.prev_outer.filter(|_| ov.was_visible) {
-            ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(o.min));
-        } else if let Some(cmd) = egui::ViewportCommand::center_on_screen(ctx) {
-            ctx.send_viewport_cmd(cmd);
-        }
-        if !ov.was_visible && !open_full {
-            self.hide_at = Some(Instant::now() + Duration::from_millis(120));
-            ctx.request_repaint_after(Duration::from_millis(130));
-        }
+        self.shared.restore_after_overlay(open_full);
+        ctx.request_repaint();
     }
 
     fn overlay_ui(&mut self, ctx: &egui::Context, st: &Status) {
@@ -1255,14 +1371,18 @@ impl App {
                 util::open_in_explorer(&self.cfg.output_dir, false);
             }
             ui.add_space(space::S8);
-            if st.recent.is_empty() {
+            if self.overlay_clips_at.map_or(true, |t| t.elapsed() > Duration::from_secs(2)) {
+                self.overlay_clips = crate::engine::scan_clips(&self.cfg.output_dir, 3);
+                self.overlay_clips_at = Some(Instant::now());
+            }
+            if self.overlay_clips.is_empty() {
                 ui.label(RichText::new(tr!("Пока пусто", "Nothing yet", "Поки порожньо")).font(theme::subhead()).color(color::TEXT_SECONDARY));
             } else {
                 let avail = ui.available_width();
                 let tile_w = ((avail - space::S8 * 2.0) / 3.0).floor();
                 let mut picked: Option<std::path::PathBuf> = None;
                 ui.horizontal(|ui| {
-                    for clip in st.recent.iter().take(3) {
+                    for clip in self.overlay_clips.iter() {
                         if gallery_tile(ui, clip, tile_w).clicked() {
                             picked = Some(clip.path.clone());
                         }

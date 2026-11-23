@@ -784,6 +784,32 @@ struct Recorder {
     base: i64,
 }
 
+/// The newest `n` clips in the output folder (all time, not just this session).
+pub fn scan_clips(dir: &std::path::Path, n: usize) -> Vec<ClipInfo> {
+    let Ok(rd) = std::fs::read_dir(dir) else { return Vec::new() };
+    let mut files: Vec<(std::time::SystemTime, PathBuf, u64)> = rd
+        .flatten()
+        .filter_map(|e| {
+            let p = e.path();
+            if !p.extension().map(|x| x.eq_ignore_ascii_case("mp4")).unwrap_or(false) {
+                return None;
+            }
+            let m = e.metadata().ok()?;
+            m.is_file().then(|| (m.modified().unwrap_or(std::time::UNIX_EPOCH), p, m.len()))
+        })
+        .collect();
+    files.sort_by(|a, b| b.0.cmp(&a.0));
+    files
+        .into_iter()
+        .take(n)
+        .map(|(_, p, bytes)| {
+            let secs = mp4::probe_duration(&p).unwrap_or(0.0);
+            let is_replay = p.file_name().map(|f| f.to_string_lossy().contains(" - Replay ")).unwrap_or(false);
+            ClipInfo { path: p, secs, bytes, is_replay }
+        })
+        .collect()
+}
+
 fn push_recent(status: &SharedStatus, clip: ClipInfo) {
     let mut s = status.write();
     s.recent.insert(0, clip);
@@ -913,9 +939,10 @@ fn sink_thread(
         if let Some((_, at)) = &pending_save {
             if Instant::now() >= *at {
                 let (path, _) = pending_save.take().unwrap();
-                match (&replay, &video_info) {
+                match (&mut replay, &video_info) {
                     (Some(b), Some(vi)) => match b.snapshot() {
                         Some(snap) => {
+                            b.clear();
                             let mut packets = vec![snap.video];
                             packets.extend(snap.audio);
                             let tr = tracks(vi);

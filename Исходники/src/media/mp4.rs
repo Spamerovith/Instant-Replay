@@ -530,3 +530,51 @@ impl StreamWriter {
         Ok(self.layout.duration_secs())
     }
 }
+
+/// Duration (seconds) of an MP4 file from its `moov/mvhd` box, without reading the media data.
+pub fn probe_duration(path: &Path) -> Option<f64> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut f = std::fs::File::open(path).ok()?;
+    let len = f.metadata().ok()?.len();
+    let mut pos = 0u64;
+    while pos + 8 <= len {
+        f.seek(SeekFrom::Start(pos)).ok()?;
+        let mut h = [0u8; 16];
+        f.read_exact(&mut h[..8]).ok()?;
+        let mut size = u32::from_be_bytes(h[0..4].try_into().ok()?) as u64;
+        let mut hdr = 8u64;
+        if size == 1 {
+            f.read_exact(&mut h[8..16]).ok()?;
+            size = u64::from_be_bytes(h[8..16].try_into().ok()?);
+            hdr = 16;
+        } else if size == 0 {
+            size = len - pos;
+        }
+        if size < hdr {
+            return None;
+        }
+        if &h[4..8] == b"moov" {
+            // The first child of moov is mvhd.
+            let mut m = [0u8; 8 + 4 + 8 + 8 + 4 + 8];
+            f.seek(SeekFrom::Start(pos + hdr)).ok()?;
+            f.read_exact(&mut m[..8]).ok()?;
+            if &m[4..8] != b"mvhd" {
+                return None;
+            }
+            f.read_exact(&mut m[8..12]).ok()?;
+            return if m[8] == 1 {
+                f.read_exact(&mut m[12..40]).ok()?;
+                let ts = u32::from_be_bytes(m[28..32].try_into().ok()?) as f64;
+                let d = u64::from_be_bytes(m[32..40].try_into().ok()?) as f64;
+                (ts > 0.0).then(|| d / ts)
+            } else {
+                f.read_exact(&mut m[12..28]).ok()?;
+                let ts = u32::from_be_bytes(m[20..24].try_into().ok()?) as f64;
+                let d = u32::from_be_bytes(m[24..28].try_into().ok()?) as f64;
+                (ts > 0.0).then(|| d / ts)
+            };
+        }
+        pos += size;
+    }
+    None
+}
