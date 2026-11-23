@@ -910,7 +910,7 @@ impl App {
                         open_clip = Some(path.clone());
                     }
                     resp.context_menu(|ui| {
-                        if clip_menu(ui) {
+                        if clip_menu(ui, &path) {
                             delete_req = Some(path.clone());
                         }
                     });
@@ -1547,7 +1547,7 @@ impl App {
                             picked = Some(clip.path.clone());
                         }
                         resp.context_menu(|ui| {
-                            if clip_menu(ui) {
+                            if clip_menu(ui, &clip.path) {
                                 delete_req = Some(clip.path.clone());
                             }
                         });
@@ -1707,15 +1707,20 @@ fn picture_size(cfg: &Config, out: (u32, u32)) -> (u32, u32) {
     }
 }
 
-/// Right-click menu of a clip; true when "Delete" was chosen.
-fn clip_menu(ui: &mut Ui) -> bool {
-    let mut chosen = false;
-    ui.set_min_width(140.0);
-    if ui.add(egui::Button::new(RichText::new(tr!("Удалить", "Delete", "Видалити")).font(theme::subhead()).color(color::RECORD)).frame(false)).clicked() {
-        chosen = true;
+/// Right-click menu of a clip: "Show in folder" is done here, true when "Delete" was chosen.
+fn clip_menu(ui: &mut Ui, path: &std::path::Path) -> bool {
+    let mut delete = false;
+    ui.set_min_width(190.0);
+    let item = |ui: &mut Ui, text: &str, col: Color32| ui.add(egui::Button::new(RichText::new(text).font(theme::subhead()).color(col)).frame(false)).clicked();
+    if item(ui, tr!("Открыть расположение", "Show in folder", "Відкрити розташування"), color::TEXT) {
+        util::open_in_explorer(path, true);
         ui.close_menu();
     }
-    chosen
+    if item(ui, tr!("Удалить", "Delete", "Видалити"), color::RECORD) {
+        delete = true;
+        ui.close_menu();
+    }
+    delete
 }
 
 impl App {
@@ -2069,7 +2074,7 @@ impl App {
                                 picked = Some(clip.path.clone());
                             }
                             resp.context_menu(|ui| {
-                                if clip_menu(ui) {
+                                if clip_menu(ui, &clip.path) {
                                     delete_req = Some(clip.path.clone());
                                 }
                             });

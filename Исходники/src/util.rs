@@ -130,7 +130,8 @@ pub fn free_disk_bytes(path: &std::path::Path) -> Option<u64> {
 pub fn open_in_explorer(path: &std::path::Path, select: bool) {
     let mut cmd = std::process::Command::new("explorer.exe");
     if select {
-        cmd.arg(format!("/select,{}", path.display()));
+        use std::os::windows::process::CommandExt;
+        cmd.raw_arg(format!("/select,\"{}\"", path.display()));
     } else {
         cmd.arg(path);
     }
