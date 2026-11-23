@@ -143,6 +143,9 @@ pub struct Config {
     pub notify_sound: bool,
     /// Clips go into a folder named after the game (like the NVIDIA overlay does).
     pub game_folders: bool,
+    /// The overlay shows up in screen sharing (Discord, OBS) and screenshots. It then also gets
+    /// into a recording of the whole monitor.
+    pub overlay_visible_in_capture: bool,
 
     /// Interface language ("ru" / "en" / "uk"); `None` until the first-run choice.
     pub language: Option<String>,
@@ -194,6 +197,7 @@ impl Default for Config {
             notify_overlay: true,
             notify_sound: true,
             game_folders: true,
+            overlay_visible_in_capture: true,
             language: None,
             skip_version: String::new(),
             profiles: Vec::new(),

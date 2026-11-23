@@ -147,6 +147,7 @@ pub mod glyph {
     pub const BACK_TO_WINDOW: &str = "\u{E73F}";
     pub const AUDIO: &str = "\u{E8D6}";
     pub const DOWNLOAD: &str = "\u{E896}";
+    pub const DELETE: &str = "\u{E74D}";
 }
 
 fn read_font(names: &[&str]) -> Option<Vec<u8>> {

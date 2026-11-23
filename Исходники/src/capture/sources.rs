@@ -204,8 +204,49 @@ pub fn foreground_program() -> Option<String> {
     }
 }
 
+/// Executable of the foreground window's process (from the process snapshot, no handle opened).
+pub fn foreground_exe() -> Option<String> {
+    unsafe {
+        let h = GetForegroundWindow();
+        if h.is_invalid() {
+            return None;
+        }
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(h, Some(&mut pid));
+        if pid == 0 {
+            return None;
+        }
+        process_names().remove(&pid)
+    }
+}
+
+/// Screenshot tools that take the focus for a moment (PrintScreen, Win+Shift+S and the like):
+/// the overlay must stay open for them, otherwise it is gone before the picture is taken.
+pub fn is_screenshot_tool(exe: &str) -> bool {
+    const TOOLS: [&str; 10] = [
+        "screenclippinghost.exe",
+        "snippingtool.exe",
+        "screensketch.exe",
+        "sharex.exe",
+        "lightshot.exe",
+        "greenshot.exe",
+        "flameshot.exe",
+        "gyazo.exe",
+        "gyazowin.exe",
+        "picpick.exe",
+    ];
+    TOOLS.iter().any(|t| exe.eq_ignore_ascii_case(t))
+}
+
 #[cfg(test)]
 mod program_tests {
+    #[test]
+    fn screenshot_tools_are_known() {
+        assert!(super::is_screenshot_tool("ScreenClippingHost.exe"));
+        assert!(super::is_screenshot_tool("SnippingTool.exe"));
+        assert!(!super::is_screenshot_tool("cs2.exe"));
+    }
+
     use super::*;
 
     #[test]

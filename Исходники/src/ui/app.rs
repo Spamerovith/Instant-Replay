@@ -225,6 +225,50 @@ impl UiShared {
         }
     }
 
+    /// Overlay window as the side panel at the right edge of its monitor.
+    pub fn overlay_panel_rect(&self) {
+        self.overlay_resize(false);
+    }
+
+    /// Overlay window as the quick-view card in the middle of its monitor.
+    pub fn overlay_quick_rect(&self) {
+        self.overlay_resize(true);
+    }
+
+    fn overlay_resize(&self, quick: bool) {
+        use windows::Win32::Foundation::HWND;
+        use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST};
+        use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
+        use windows::Win32::UI::WindowsAndMessaging::*;
+        let h = self.hwnd.load(Ordering::SeqCst);
+        if h == 0 || !self.in_overlay.load(Ordering::SeqCst) {
+            return;
+        }
+        unsafe {
+            let hwnd = HWND(h as _);
+            let mon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+            let mut mi = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
+            if !GetMonitorInfoW(mon, &mut mi).as_bool() {
+                return;
+            }
+            let (mut dpi, mut dpi_y) = (96u32, 96u32);
+            if GetDpiForMonitor(mon, MDT_EFFECTIVE_DPI, &mut dpi, &mut dpi_y).is_err() {
+                dpi = 96;
+            }
+            let k = dpi.max(96) as f32 / 96.0;
+            let work = mi.rcWork;
+            let (ww, wh) = ((work.right - work.left) as f32, (work.bottom - work.top) as f32);
+            let (x, y, w, hgt) = if quick {
+                let (w, hgt) = quick_card_size(ww, wh, k);
+                (work.left + ((ww - w) / 2.0) as i32, work.top + ((wh - hgt) / 2.0) as i32, w as i32, hgt as i32)
+            } else {
+                let w = (size::OVERLAY_W * k).round() as i32;
+                (work.right - w, work.top, w, work.bottom - work.top)
+            };
+            let _ = SetWindowPos(hwnd, HWND_TOPMOST, x, y, w, hgt, SWP_NOSENDCHANGING | SWP_SHOWWINDOW);
+        }
+    }
+
     /// Keeps the overlay out of screen capture (it is never recorded).
     pub fn exclude_from_capture(&self, exclude: bool) {
         use windows::Win32::UI::WindowsAndMessaging::{SetWindowDisplayAffinity, WDA_EXCLUDEFROMCAPTURE, WDA_NONE};
@@ -247,6 +291,20 @@ impl UiShared {
         }
         self.visible.store(false, Ordering::SeqCst);
     }
+}
+
+/// Quick-view window size in pixels for a work area of `ww` x `wh` (`k` = DPI scale): 72 % of the
+/// width, a 16:9 picture plus header and controls, at most 85 % of the height.
+fn quick_card_size(ww: f32, wh: f32, k: f32) -> (f32, f32) {
+    let chrome = (20.0 * 2.0 + 32.0 + 4.0 + 18.0 + 12.0 + 12.0 + 40.0) * k; // padding, header, controls
+    let mut w = (ww * 0.72).round();
+    let mut h = (w - 40.0 * k) * 9.0 / 16.0 + chrome;
+    let max_h = (wh * 0.85).round();
+    if h > max_h {
+        h = max_h;
+        w = (h - chrome) * 16.0 / 9.0 + 40.0 * k;
+    }
+    (w.round(), h.round())
 }
 
 /// Style bits of the regular window frame that the overlay goes without.
@@ -317,6 +375,8 @@ pub struct App {
     /// Встроенный плеер открытого клипа (если JustView не найден).
     viewer: Option<Viewer>,
     viewer_prefs: ViewerPrefs,
+    /// Clip playing in the overlay's quick view.
+    quick: Option<super::quick::QuickView>,
     /// Newest clips on disk for the overlay gallery (all time).
     overlay_clips: Vec<crate::engine::ClipInfo>,
     overlay_clips_at: Option<Instant>,
@@ -376,6 +436,7 @@ impl App {
             overlay: None,
             viewer: None,
             viewer_prefs: ViewerPrefs::default(),
+            quick: None,
             overlay_clips: Vec::new(),
             overlay_clips_at: None,
             home_clips: Vec::new(),
@@ -488,12 +549,25 @@ impl eframe::App for App {
         }
         if let Some(ov) = &mut self.overlay {
             let focused = ctx.input(|i| i.viewport().focused);
-            let esc = ctx.input(|i| i.key_pressed(egui::Key::Escape));
+            // Esc of the delete confirmation belongs to it.
+            let esc = self.delete_pending.is_none() && ctx.input(|i| i.key_pressed(egui::Key::Escape));
             if focused == Some(true) {
                 ov.focused = true;
             }
-            let lost = ov.focused && focused == Some(false) && ov.opened.elapsed() > Duration::from_millis(400);
-            if esc && ov.gallery {
+            let mut lost = ov.focused && focused == Some(false) && ov.opened.elapsed() > Duration::from_millis(400);
+            if lost {
+                // A screenshot tool (PrintScreen, Win+Shift+S) takes the focus for a moment: the
+                // overlay stays so that it gets into the picture.
+                let snip = sources::foreground_exe().map_or(false, |e| sources::is_screenshot_tool(&e));
+                if snip {
+                    lost = false;
+                    ctx.request_repaint_after(Duration::from_millis(150));
+                }
+            }
+            if esc && self.quick.is_some() {
+                self.quick = None; // Esc closes the quick view first
+                self.shared.overlay_panel_rect();
+            } else if esc && ov.gallery {
                 ov.gallery = false; // Esc leaves the gallery first, then the overlay
             } else if esc || lost {
                 self.exit_overlay(ctx, false);
@@ -1391,6 +1465,20 @@ impl App {
             });
         });
         ui.add_space(space::S24);
+        w::group(ui, Some(tr!("Оверлей", "Overlay", "Оверлей")), |g| {
+            g.row(
+                tr!("Виден в демонстрации экрана", "Visible in screen sharing", "Видно в демонстрації екрана"),
+                Some(tr!(
+                    "Discord, OBS и скриншоты видят оверлей. Если записывается весь монитор, он попадает и в клип",
+                    "Discord, OBS and screenshots see the overlay. When the whole monitor is recorded, it gets into the clip too",
+                    "Discord, OBS і скриншоти бачать оверлей. Якщо записується весь монітор, він потрапляє і в кліп"
+                )),
+                |ui| {
+                    w::switch(ui, &mut self.cfg.overlay_visible_in_capture, tr!("Виден в демонстрации экрана", "Visible in screen sharing", "Видно в демонстрації екрана"));
+                },
+            );
+        });
+        ui.add_space(space::S24);
         w::group(ui, Some(tr!("Уведомления", "Notifications", "Сповіщення")), |g| {
             g.row(tr!("Уведомление поверх игры", "Notification over the game", "Сповіщення поверх гри"), Some(tr!("Не попадает в запись", "Not captured in recordings", "Не потрапляє в запис")), |ui| {
                 w::switch(ui, &mut self.cfg.notify_overlay, tr!("Уведомление поверх игры", "Notification over the game", "Сповіщення поверх гри"));
@@ -1486,12 +1574,14 @@ impl App {
         // The window was already moved, resized and put on top by `UiShared::place_as_overlay`.
         self.overlay = Some(OverlayMode { focused: false, opened: Instant::now(), frames: 0, gallery: false });
         self.overlay_clips_at = None;
+        self.mics = audio::list_microphones(); // a headset may have been plugged in since
         self.shared.in_overlay.store(true, Ordering::SeqCst);
-        self.shared.exclude_from_capture(true);
+        self.shared.exclude_from_capture(!self.cfg.overlay_visible_in_capture);
     }
 
     /// Leaves overlay mode. `open_full` keeps the regular window open afterwards.
     fn exit_overlay(&mut self, ctx: &egui::Context, open_full: bool) {
+        self.quick = None;
         if self.overlay.take().is_none() {
             return;
         }
@@ -1504,6 +1594,20 @@ impl App {
     }
 
     fn overlay_ui(&mut self, ctx: &egui::Context, st: &Status) {
+        if let Some(q) = &mut self.quick {
+            match q.ui(ctx, &mut self.viewer_prefs) {
+                super::quick::QuickAction::Close => {
+                    self.quick = None;
+                    self.shared.overlay_panel_rect();
+                }
+                super::quick::QuickAction::Delete => {
+                    self.delete_pending = Some(q.path.clone());
+                    self.delete_error = None;
+                }
+                super::quick::QuickAction::None => {}
+            }
+            return;
+        }
         if self.overlay.as_ref().map_or(false, |o| o.gallery) {
             self.overlay_gallery_ui(ctx);
             return;
@@ -1618,6 +1722,31 @@ impl App {
             overlay_row(ui, glyph::MIC, tr!("Микрофон", "Microphone", "Мікрофон"), None, |ui| {
                 w::switch(ui, &mut self.cfg.mic_enabled, tr!("Микрофон", "Microphone", "Мікрофон"));
             });
+            if self.cfg.mic_enabled {
+                // Which microphone: the same choice as on the Audio page.
+                ui.horizontal(|ui| {
+                    ui.add_space(space::S32);
+                    let default = tr!("По умолчанию", "Default", "За замовчуванням");
+                    let current = self
+                        .cfg
+                        .mic_device
+                        .as_ref()
+                        .and_then(|id| self.mics.iter().find(|m| &m.id == id).map(|m| m.name.clone()))
+                        .unwrap_or_else(|| default.into());
+                    let width = ui.available_width();
+                    egui::ComboBox::from_id_salt("ov-mic").width(width).selected_text(RichText::new(current).font(theme::subhead())).show_ui(ui, |ui| {
+                        if ui.selectable_label(self.cfg.mic_device.is_none(), default).clicked() {
+                            self.cfg.mic_device = None;
+                        }
+                        for m in &self.mics {
+                            if ui.selectable_label(self.cfg.mic_device.as_deref() == Some(m.id.as_str()), &m.name).clicked() {
+                                self.cfg.mic_device = Some(m.id.clone());
+                            }
+                        }
+                    });
+                });
+                ui.add_space(space::S8);
+            }
             overlay_row(ui, glyph::VOLUME, tr!("Звук системы", "System audio", "Звук системи"), None, |ui| {
                 w::switch(ui, &mut self.cfg.system_audio, tr!("Звук системы", "System audio", "Звук системи"));
             });
@@ -1774,6 +1903,11 @@ impl App {
             });
         });
         if confirm {
+            if self.quick.as_ref().map_or(false, |q| q.path == path) {
+                // The player holds the file open: stop it first, and back to the overlay panel.
+                self.quick = None;
+                self.shared.overlay_panel_rect();
+            }
             crate::thumbs::forget(&path); // needs the file to find its picture: before it goes away
             match crate::recycle::recycle(&path) {
                 Ok(()) => {
@@ -1995,13 +2129,13 @@ fn clip_thumb(ui: &mut Ui, tex: Option<egui::TextureId>, is_replay: bool, size: 
 // ------------------------------------------------------------------ overlay gallery page
 
 impl App {
-    /// Opens a clip from the overlay: the overlay closes without bringing the program window up
-    /// (the clip opens in JustView; the program window only appears for the built-in fallback).
+    /// Opens a clip from the overlay in the quick view: it plays right over the game, the overlay
+    /// window grows into a card in the middle of the monitor. Closing it brings the panel back.
     fn open_from_overlay(&mut self, ctx: &egui::Context, path: &std::path::Path) {
-        let external = util::find_justview().is_some();
-        self.shared.skip_refocus.store(external, Ordering::SeqCst);
-        self.open_clip(ctx, path);
-        self.exit_overlay(ctx, !external);
+        let bytes = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+        self.quick = Some(super::quick::QuickView::open(ctx, path, bytes, &self.viewer_prefs));
+        self.shared.overlay_quick_rect();
+        ctx.request_repaint();
     }
 
     /// The overlay's gallery: every clip of the save folder as a grid of previews.

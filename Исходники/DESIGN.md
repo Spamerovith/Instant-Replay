@@ -82,6 +82,7 @@ Gap between groups 24. Group title → group 8. Proximity: inside control < betw
 | `slider` track / thumb | 4 / 18 |
 | `nav-item` height | 36, sidebar width 220 |
 | `overlay` panel | width 400, full work-area height, `surface` fill, rows 48 / 56 with hotkey line, gallery tiles 72 high (3 per row) |
+| `quick view` | overlay clip player: window centred on the game's monitor, 72 % of the work-area width (max 85 % height), `surface` fill, padding 20; header (icon + game, file name / resolution + size), 16:9 stage with `input` radius, control row 40 (play, seek track 4 with 12 thumb, time, volume slider 96, folder, delete); Ctrl + wheel zooms 100-800 %, drag pans, double-click resets |
 | `keycap` height / min width | 30 / 168 (one width for the whole column) |
 
 ## Motion
