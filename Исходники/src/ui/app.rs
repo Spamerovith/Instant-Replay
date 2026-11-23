@@ -22,6 +22,8 @@ pub struct UiShared {
     pub quitting: AtomicBool,
     pub overlay_request: AtomicBool,
     pub in_overlay: AtomicBool,
+    /// Set when a clip opens from the overlay: the game must not take the focus back from it.
+    skip_refocus: AtomicBool,
     /// Window state before the overlay took the window over; restored exactly when it closes.
     overlay_saved: parking_lot::Mutex<Option<OverlaySaved>>,
 }
@@ -34,6 +36,7 @@ impl UiShared {
             quitting: AtomicBool::new(false),
             overlay_request: AtomicBool::new(false),
             in_overlay: AtomicBool::new(false),
+            skip_refocus: AtomicBool::new(false),
             overlay_saved: parking_lot::Mutex::new(None),
         })
     }
@@ -162,6 +165,7 @@ impl UiShared {
         use windows::Win32::Foundation::HWND;
         use windows::Win32::UI::WindowsAndMessaging::*;
         let Some(s) = self.overlay_saved.lock().take() else { return };
+        let skip_refocus = self.skip_refocus.swap(false, Ordering::SeqCst);
         let h = self.hwnd.load(Ordering::SeqCst);
         if h == 0 {
             return;
@@ -174,7 +178,7 @@ impl UiShared {
             let was_max = wp.showCmd == SW_SHOWMAXIMIZED.0 as u32 || (was_min && (wp.flags.0 & WPF_RESTORETOMAXIMIZED.0) != 0);
             if !open_full {
                 // Give the focus back to the game while we still own it.
-                if !prev_fg.is_invalid() && prev_fg != hwnd && GetForegroundWindow() == hwnd {
+                if !skip_refocus && !prev_fg.is_invalid() && prev_fg != hwnd && GetForegroundWindow() == hwnd {
                     let _ = SetForegroundWindow(prev_fg);
                 }
                 if s.hidden {
@@ -288,6 +292,8 @@ struct OverlayMode {
     opened: Instant,
     /// Frames drawn so far: the overlay stays see-through until its first frame is on screen.
     frames: u32,
+    /// The overlay shows the full gallery instead of the main page.
+    gallery: bool,
 }
 
 pub struct App {
@@ -317,6 +323,9 @@ pub struct App {
     /// Clip waiting for the delete confirmation, and the error of the last attempt.
     delete_pending: Option<std::path::PathBuf>,
     delete_error: Option<String>,
+    /// Every clip of the save folder for the overlay gallery page.
+    gallery_clips: Vec<crate::engine::ClipInfo>,
+    gallery_at: Option<Instant>,
     /// Preview pictures of clips: asked for once, `None` until ready (or when none could be made).
     thumbs: crate::thumbs::Thumbs,
     thumb_tex: std::collections::HashMap<std::path::PathBuf, Option<egui::TextureHandle>>,
@@ -366,6 +375,8 @@ impl App {
             overlay_clips_at: None,
             delete_pending: None,
             delete_error: None,
+            gallery_clips: Vec::new(),
+            gallery_at: None,
             thumbs: crate::thumbs::Thumbs::start(cc.egui_ctx.clone()),
             thumb_tex: std::collections::HashMap::new(),
             update: None,
@@ -473,7 +484,9 @@ impl eframe::App for App {
                 ov.focused = true;
             }
             let lost = ov.focused && focused == Some(false) && ov.opened.elapsed() > Duration::from_millis(400);
-            if esc || lost {
+            if esc && ov.gallery {
+                ov.gallery = false; // Esc leaves the gallery first, then the overlay
+            } else if esc || lost {
                 self.exit_overlay(ctx, false);
             }
         }
@@ -1449,7 +1462,7 @@ fn estimate_memory(cfg: &Config, out: (u32, u32)) -> String {
 impl App {
     fn enter_overlay(&mut self, ctx: &egui::Context) {
         // The window was already moved, resized and put on top by `UiShared::place_as_overlay`.
-        self.overlay = Some(OverlayMode { focused: false, opened: Instant::now(), frames: 0 });
+        self.overlay = Some(OverlayMode { focused: false, opened: Instant::now(), frames: 0, gallery: false });
         self.overlay_clips_at = None;
         self.shared.in_overlay.store(true, Ordering::SeqCst);
         self.shared.exclude_from_capture(true);
@@ -1469,6 +1482,10 @@ impl App {
     }
 
     fn overlay_ui(&mut self, ctx: &egui::Context, st: &Status) {
+        if self.overlay.as_ref().map_or(false, |o| o.gallery) {
+            self.overlay_gallery_ui(ctx);
+            return;
+        }
         let frame = egui::Frame::none().fill(color::SURFACE).inner_margin(egui::Margin::symmetric(space::S20, space::S16));
         egui::CentralPanel::default().frame(frame).show(ctx, |ui| {
             ui.spacing_mut().item_spacing = vec2(space::S8, 0.0);
@@ -1492,8 +1509,10 @@ impl App {
                 ui.label(RichText::new(glyph::CHEVRON_RIGHT).font(theme::icon(12.0)).color(color::TEXT_SECONDARY));
             });
             if open_folder {
-                let _ = std::fs::create_dir_all(&self.cfg.output_dir);
-                util::open_in_explorer(&self.cfg.output_dir, false);
+                if let Some(ov) = &mut self.overlay {
+                    ov.gallery = true;
+                }
+                self.gallery_at = None;
             }
             ui.add_space(space::S8);
             if self.overlay_clips_at.map_or(true, |t| t.elapsed() > Duration::from_secs(2)) {
@@ -1511,7 +1530,7 @@ impl App {
                 let tile_tex: Vec<Option<egui::TextureId>> = clips_now.iter().map(|c| self.thumb_for(c)).collect();
                 ui.horizontal(|ui| {
                     for (clip, tex) in self.overlay_clips.iter().zip(tile_tex.iter()) {
-                        let resp = gallery_tile(ui, clip, tile_w, *tex);
+                        let resp = gallery_tile(ui, clip, tile_w, size::OVERLAY_TILE_H, *tex);
                         if resp.clicked() {
                             picked = Some(clip.path.clone());
                         }
@@ -1527,8 +1546,7 @@ impl App {
                     self.delete_error = None;
                 }
                 if let Some(p) = picked {
-                    self.exit_overlay(ctx, true);
-                    self.open_clip(ctx, &p);
+                    self.open_from_overlay(ctx, &p);
                 }
             }
             ui.add_space(space::S8);
@@ -1624,8 +1642,8 @@ fn overlay_row(ui: &mut Ui, g: &str, title: &str, sub: Option<&str>, control: im
     resp.clicked()
 }
 
-fn gallery_tile(ui: &mut Ui, clip: &crate::engine::ClipInfo, tile_w: f32, tex: Option<egui::TextureId>) -> egui::Response {
-    let (rect, resp) = ui.allocate_exact_size(vec2(tile_w, size::OVERLAY_TILE_H), egui::Sense::click());
+fn gallery_tile(ui: &mut Ui, clip: &crate::engine::ClipInfo, tile_w: f32, tile_h: f32, tex: Option<egui::TextureId>) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(vec2(tile_w, tile_h), egui::Sense::click());
     let name = clip.path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
     let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(name);
     let hover = ui.ctx().animate_bool_with_time(resp.id, resp.hovered(), w::dur(theme::motion::HOVER));
@@ -1633,7 +1651,7 @@ fn gallery_tile(ui: &mut Ui, clip: &crate::engine::ClipInfo, tile_w: f32, tex: O
     match tex {
         Some(id) => {
             // The 16:9 picture fills the tile; the sides that do not fit are cropped.
-            let want = tile_w / size::OVERLAY_TILE_H;
+            let want = tile_w / tile_h;
             let have = crate::thumbs::W as f32 / crate::thumbs::H as f32;
             let uv = if want < have {
                 let k = want / have;
@@ -1734,6 +1752,8 @@ impl App {
                 Ok(()) => {
                     self.engine.status.write().recent.retain(|c| c.path != path);
                     self.overlay_clips.retain(|c| c.path != path);
+                    self.gallery_clips.retain(|c| c.path != path);
+                    self.gallery_at = None;
                     self.thumb_tex.remove(&path);
                     self.overlay_clips_at = None;
                     self.delete_pending = None;
@@ -1941,4 +1961,98 @@ fn clip_thumb(ui: &mut Ui, tex: Option<egui::TextureId>, is_replay: bool, size: 
         }
     }
     ui.add_space(space::S4);
+}
+
+// ------------------------------------------------------------------ overlay gallery page
+
+impl App {
+    /// Opens a clip from the overlay: the overlay closes without bringing the program window up
+    /// (the clip opens in JustView; the program window only appears for the built-in fallback).
+    fn open_from_overlay(&mut self, ctx: &egui::Context, path: &std::path::Path) {
+        let external = util::find_justview().is_some();
+        self.shared.skip_refocus.store(external, Ordering::SeqCst);
+        self.open_clip(ctx, path);
+        self.exit_overlay(ctx, !external);
+    }
+
+    /// The overlay's gallery: every clip of the save folder as a grid of previews.
+    fn overlay_gallery_ui(&mut self, ctx: &egui::Context) {
+        if self.gallery_at.map_or(true, |t| t.elapsed() > Duration::from_secs(3)) {
+            self.gallery_clips = crate::engine::scan_clips(&self.cfg.output_dir, 300);
+            self.gallery_at = Some(Instant::now());
+        }
+        let mut back = false;
+        let mut close = false;
+        let mut folder = false;
+        let mut picked: Option<std::path::PathBuf> = None;
+        let mut delete_req: Option<std::path::PathBuf> = None;
+        let clips = self.gallery_clips.clone();
+        let frame = egui::Frame::none().fill(color::SURFACE).inner_margin(egui::Margin::symmetric(space::S20, space::S16));
+        egui::CentralPanel::default().frame(frame).show(ctx, |ui| {
+            ui.spacing_mut().item_spacing = vec2(space::S8, 0.0);
+            ui.horizontal(|ui| {
+                ui.set_min_height(size::BUTTON_MD);
+                if w::icon_button(ui, glyph::BACK, tr!("Назад", "Back", "Назад")).clicked() {
+                    back = true;
+                }
+                ui.label(RichText::new(tr!("Галерея", "Gallery", "Галерея")).font(theme::headline()).color(color::TEXT));
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if w::icon_button(ui, glyph::CLOSE, tr!("Закрыть", "Close", "Закрити")).clicked() {
+                        close = true;
+                    }
+                    if w::icon_button(ui, glyph::FOLDER, tr!("Открыть папку", "Open folder", "Відкрити теку")).clicked() {
+                        folder = true;
+                    }
+                });
+            });
+            overlay_divider(ui);
+            if clips.is_empty() {
+                ui.label(RichText::new(tr!("Пока пусто", "Nothing yet", "Поки порожньо")).font(theme::subhead()).color(color::TEXT_SECONDARY));
+                return;
+            }
+            let gap = space::S8;
+            let tile_w = ((ui.available_width() - gap) / 2.0).floor();
+            let tile_h = (tile_w * 9.0 / 16.0).round();
+            let rows = (clips.len() + 1) / 2;
+            // Only the visible rows are drawn, so only their previews are asked for.
+            egui::ScrollArea::vertical().auto_shrink([false, false]).show_rows(ui, tile_h + gap, rows, |ui, range| {
+                ui.spacing_mut().item_spacing = vec2(gap, gap);
+                for r in range {
+                    ui.horizontal(|ui| {
+                        for c in 0..2 {
+                            let Some(clip) = clips.get(r * 2 + c) else { continue };
+                            let tex = self.thumb_for(clip);
+                            let resp = gallery_tile(ui, clip, tile_w, tile_h, tex);
+                            if resp.clicked() {
+                                picked = Some(clip.path.clone());
+                            }
+                            resp.context_menu(|ui| {
+                                if clip_menu(ui) {
+                                    delete_req = Some(clip.path.clone());
+                                }
+                            });
+                        }
+                    });
+                }
+            });
+        });
+        if delete_req.is_some() {
+            self.delete_pending = delete_req;
+            self.delete_error = None;
+        }
+        if folder {
+            let _ = std::fs::create_dir_all(&self.cfg.output_dir);
+            util::open_in_explorer(&self.cfg.output_dir, false);
+        }
+        if back {
+            if let Some(ov) = &mut self.overlay {
+                ov.gallery = false;
+            }
+        }
+        if close {
+            self.exit_overlay(ctx, false);
+        } else if let Some(p) = picked {
+            self.open_from_overlay(ctx, &p);
+        }
+    }
 }
