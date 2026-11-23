@@ -320,6 +320,8 @@ pub struct App {
     /// Newest clips on disk for the overlay gallery (all time).
     overlay_clips: Vec<crate::engine::ClipInfo>,
     overlay_clips_at: Option<Instant>,
+    home_clips: Vec<crate::engine::ClipInfo>,
+    home_clips_at: Option<Instant>,
     /// Clip waiting for the delete confirmation, and the error of the last attempt.
     delete_pending: Option<std::path::PathBuf>,
     delete_error: Option<String>,
@@ -376,6 +378,8 @@ impl App {
             viewer_prefs: ViewerPrefs::default(),
             overlay_clips: Vec::new(),
             overlay_clips_at: None,
+            home_clips: Vec::new(),
+            home_clips_at: None,
             delete_pending: None,
             delete_error: None,
             gallery_clips: Vec::new(),
@@ -881,16 +885,22 @@ impl App {
             });
         });
         ui.add_space(space::S8 - ui.spacing().item_spacing.y);
-        let recent_tex: Vec<Option<egui::TextureId>> = st.recent.iter().map(|c| self.thumb_for(c)).collect();
+        // The newest clips of all time (not just this session), refreshed every few seconds.
+        if self.home_clips_at.map_or(true, |t| t.elapsed() > Duration::from_secs(3)) {
+            self.home_clips = crate::engine::scan_clips(&self.cfg.output_dir, 8);
+            self.home_clips_at = Some(Instant::now());
+        }
+        let home_clips = self.home_clips.clone();
+        let recent_tex: Vec<Option<egui::TextureId>> = home_clips.iter().map(|c| self.thumb_for(c)).collect();
         let mut open_clip: Option<std::path::PathBuf> = None;
         let mut delete_req: Option<std::path::PathBuf> = None;
         w::group(ui, None, |g| {
-            if st.recent.is_empty() {
+            if home_clips.is_empty() {
                 g.row(tr!("Пока пусто", "Nothing yet", "Поки порожньо"), None, |ui| {
                     w::value_text(ui, &trf!(["{} или {}", "{} or {}", "{} або {}"], hotkeys::describe(&self.cfg.hotkey_save_replay), hotkeys::describe(&self.cfg.hotkey_record)));
                 });
             }
-            for (clip, tex) in st.recent.iter().zip(recent_tex.iter()) {
+            for (clip, tex) in home_clips.iter().zip(recent_tex.iter()) {
                 let name = clip.path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
                 let meta = format!("{} · {}", util::format_duration(clip.secs), util::format_bytes(clip.bytes));
                 let path = clip.path.clone();
@@ -1773,6 +1783,8 @@ impl App {
                     self.gallery_at = None;
                     self.thumb_tex.remove(&path);
                     self.overlay_clips_at = None;
+                    self.home_clips.retain(|c| c.path != path);
+                    self.home_clips_at = None;
                     self.delete_pending = None;
                     self.delete_error = None;
                 }
