@@ -3,3 +3,5 @@
 /Instant Replay/*.exe
 /Instant Replay/*.old
 /Instant Replay/*.download
+/Исходники/embed/
+/Исходники/justview/target/

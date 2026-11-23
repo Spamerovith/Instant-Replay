@@ -17,6 +17,7 @@ mod overlay;
 mod player;
 mod replay;
 mod sound;
+mod tools;
 mod tray;
 mod update;
 mod ui;
@@ -85,6 +86,7 @@ fn main() {
     i18n::set(cfg.language.as_deref().and_then(i18n::Lang::from_code).unwrap_or_else(i18n::system));
     update::cleanup();
     autostart::set(cfg.autostart);
+    tools::warm_up();
     let start_hidden = std::env::args().any(|a| a == "--tray") || cfg.start_minimized;
 
     tray::enable_dark_menus();
@@ -264,6 +266,7 @@ fn main() {
 
 /// Headless end-to-end check: buffer → save replay → record 6 s → stop. Results go to the log.
 fn selftest(dir: String, codec: Option<String>) {
+    log::info!("TOOLS dir={:?} justview={:?} ffprobe={:?}", tools::dir(), util::find_justview(), player::ffmpeg::ffprobe());
     let mut cfg = Config::default();
     cfg.output_dir = std::path::PathBuf::from(dir);
     cfg.replay_seconds = 15;

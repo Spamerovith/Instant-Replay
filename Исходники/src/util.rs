@@ -190,6 +190,10 @@ pub fn init_logging() {
 
 /// Path of JustView.exe: Explorer registration first, then known folders next to this app.
 pub fn find_justview() -> Option<std::path::PathBuf> {
+    // The copy built into this exe comes first: it is unpacked together with its FFmpeg.
+    if let Some(p) = crate::tools::file("JustView.exe") {
+        return Some(p);
+    }
     use std::path::PathBuf;
     use windows::core::w;
     use windows::Win32::System::Registry::{RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_SZ};

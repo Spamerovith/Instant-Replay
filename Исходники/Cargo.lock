@@ -1273,7 +1273,7 @@ dependencies = [
 
 [[package]]
 name = "instant-replay"
-version = "1.5.0"
+version = "1.6.0"
 dependencies = [
  "bytemuck",
  "cpal",
@@ -1281,6 +1281,7 @@ dependencies = [
  "eframe",
  "egui",
  "embed-resource",
+ "flate2",
  "log",
  "parking_lot",
  "raw-window-handle",

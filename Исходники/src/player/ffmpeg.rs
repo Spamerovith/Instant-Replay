@@ -17,6 +17,9 @@ pub fn hidden_command(program: impl AsRef<std::ffi::OsStr>) -> Command {
 
 fn find_tool(name: &str) -> Option<PathBuf> {
     let exe = format!("{name}.exe");
+    if let Some(p) = crate::tools::file(&format!("ffmpeg/{exe}")) {
+        return Some(p);
+    }
     if let Ok(me) = std::env::current_exe() {
         if let Some(dir) = me.parent() {
             for c in [dir.join(&exe), dir.join("ffmpeg").join(&exe), dir.join("ffmpeg").join("bin").join(&exe)] {

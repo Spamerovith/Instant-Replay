@@ -80,6 +80,7 @@ fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=Cargo.toml");
     let out = PathBuf::from(std::env::var("OUT_DIR").unwrap());
+    embed_tools(&out);
     let ico_path = out.join("app.ico");
     std::fs::write(&ico_path, ico()).unwrap();
 
@@ -121,3 +122,23 @@ END
     embed_resource::compile(&rc_path, embed_resource::NONE);
 }
 
+
+/// Lists the packed tools from `embed/` (JustView and FFmpeg, made by `prepare-embed.ps1`) as a Rust
+/// table. A name like `ffmpeg__avcodec-63.dll.gz` is the file `ffmpeg/avcodec-63.dll`. An empty
+/// folder (plain `cargo test`) gives an empty table and the app falls back to installed tools.
+fn embed_tools(out: &std::path::Path) {
+    println!("cargo:rerun-if-changed=embed");
+    let mut names: Vec<_> = std::fs::read_dir("embed")
+        .map(|d| d.flatten().map(|e| e.file_name().to_string_lossy().to_string()).filter(|n| n.ends_with(".gz")).collect())
+        .unwrap_or_default();
+    names.sort();
+    let mut src = String::from("pub static EMBEDDED: &[(&str, &[u8])] = &[\n");
+    for n in names {
+        let rel = n.trim_end_matches(".gz").replace("__", "/");
+        let abs = std::fs::canonicalize(format!("embed/{n}")).unwrap();
+        let abs = abs.to_string_lossy().trim_start_matches(r"\\?\").replace('\\', "/");
+        src.push_str(&format!("    ({rel:?}, include_bytes!({abs:?})),\n"));
+    }
+    src.push_str("];\n");
+    std::fs::write(out.join("embedded_tools.rs"), src).unwrap();
+}

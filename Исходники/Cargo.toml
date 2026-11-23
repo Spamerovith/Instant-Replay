@@ -1,6 +1,6 @@
 ﻿[package]
 name = "instant-replay"
-version = "1.5.0"
+version = "1.6.0"
 edition = "2021"
 description = "Instant Replay and screen recorder for Windows (WGC + Media Foundation GPU encoding)"
 build = "build.rs"
@@ -21,6 +21,7 @@ rfd = "0.15"
 raw-window-handle = "0.6"
 cpal = "0.18"
 bytemuck = "1"
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 
 [dependencies.windows]
 version = "=0.58.0"

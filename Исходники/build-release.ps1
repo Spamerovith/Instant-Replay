@@ -2,6 +2,10 @@
 $ErrorActionPreference = 'Stop'
 Set-Location $PSScriptRoot
 
+# JustView and FFmpeg are packed into the exe (see prepare-embed.ps1)
+./prepare-embed.ps1
+if ($LASTEXITCODE -ne $null -and $LASTEXITCODE -ne 0) { throw 'prepare-embed failed' }
+
 cargo test --release
 if ($LASTEXITCODE -ne 0) { throw "tests failed" }
 cargo build --release
