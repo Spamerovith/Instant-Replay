@@ -135,19 +135,22 @@ impl UiShared {
                 rect.bottom - rect.top,
                 SWP_NOSENDCHANGING | SWP_FRAMECHANGED | SWP_SHOWWINDOW | SWP_NOACTIVATE,
             );
-            // The window takes the focus only once the hotkey's modifiers are released: a lone
-            // Alt key-up arriving at the freshly focused window would otherwise start its menu mode.
-            {
+            // The window takes the focus only once the hotkey's modifiers are released (a lone Alt
+            // key-up arriving at the freshly focused window would start its menu mode). Done on
+            // its own thread so that the overlay itself shows up without waiting for the keys.
+            std::thread::spawn(move || {
                 use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_CONTROL, VK_MENU, VK_SHIFT};
                 for _ in 0..40 {
-                    let down = |vk: u16| GetAsyncKeyState(vk as i32) as u16 & 0x8000 != 0;
+                    let down = |vk: u16| unsafe { GetAsyncKeyState(vk as i32) as u16 & 0x8000 != 0 };
                     if !(down(VK_MENU.0) || down(VK_CONTROL.0) || down(VK_SHIFT.0)) {
                         break;
                     }
                     std::thread::sleep(std::time::Duration::from_millis(10));
                 }
-            }
-            let _ = SetForegroundWindow(hwnd);
+                unsafe {
+                    let _ = SetForegroundWindow(HWND(h as _));
+                }
+            });
         }
         self.visible.store(true, Ordering::SeqCst);
     }
@@ -1443,7 +1446,6 @@ impl App {
         self.overlay_clips_at = None;
         self.shared.in_overlay.store(true, Ordering::SeqCst);
         self.shared.exclude_from_capture(true);
-        ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
     }
 
     /// Leaves overlay mode. `open_full` keeps the regular window open afterwards.
