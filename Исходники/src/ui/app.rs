@@ -1421,7 +1421,7 @@ impl App {
         let mut fidx = idx as f32;
         w::group(ui, Some(tr!("Быстрое сохранение", "Quick save", "Швидке збереження")), |g| {
             g.row(
-                tr!("Сколько секунд сохранять", "Seconds to save", "Скільки секунд зберігати"),
+                tr!("Длина быстрого клипа", "Quick clip length", "Довжина швидкого кліпу"),
                 Some(tr!("Берётся конец буфера, не больше его длины", "Takes the end of the buffer, no more than its length", "Береться кінець буфера, не більше його довжини")),
                 |ui| {
                     w::value_text(ui, &util::format_duration(self.cfg.save_last_seconds as f64));

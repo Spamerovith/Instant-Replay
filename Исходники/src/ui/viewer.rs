@@ -497,7 +497,9 @@ pub fn menu_pill(ui: &mut Ui, id: &str, icon: Option<&str>, text: &str, accent: 
     let fill = w::lerp_color(fill, color::SURFACE_PRESSED, p);
     let painter = ui.painter();
     painter.rect_filled(r, Rounding::same(radius::PILL), fill);
-    let mut x = r.left() + space::S16;
+    // Content centred in the pill (a short "1×" no longer hugs the left edge).
+    let content_w = lead + g.size().x;
+    let mut x = (r.center().x - content_w / 2.0).max(r.left() + space::S16 * s).round();
     if let Some(icon) = icon {
         painter.text(pos2(x, r.center().y), Align2::LEFT_CENTER, icon, theme::icon(13.0), color::TEXT_SECONDARY);
         x += lead;
