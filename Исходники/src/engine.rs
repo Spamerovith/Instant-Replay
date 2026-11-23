@@ -85,6 +85,8 @@ pub enum Command {
     SaveLast,
     ToggleRecording,
     ToggleReplay,
+    /// Screenshot of the capture source, taken after the given delay (ms).
+    Screenshot(u64),
     ApplyConfig(Box<Config>),
     Shutdown(Sender<()>),
 }
@@ -167,6 +169,7 @@ impl Engine {
                         detail: if on { trf!(["Буфер {}", "Buffer {}", "Буфер {}"], util::format_duration(self.config.replay_seconds as f64)) } else { String::new() },
                     });
                 }
+                Ok(Command::Screenshot(delay)) => self.screenshot(delay),
                 Ok(Command::ApplyConfig(c)) => self.apply_config(*c),
                 Ok(Command::Shutdown(done)) => {
                     self.stop_pipeline();
@@ -331,15 +334,44 @@ impl Engine {
     }
 
     fn output_path(&self, kind: &str) -> PathBuf {
+        self.output_path_ext(kind, "mp4")
+    }
+
+    /// Takes a screenshot of the capture source (the game window with a game profile, otherwise
+    /// the monitor) on its own thread and saves it as PNG next to the clips.
+    fn screenshot(&self, delay_ms: u64) {
+        let path = self.output_path_ext("Screenshot", "png");
+        let source = self.config.source.clone();
+        let notify = self.notify.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(delay_ms));
+            match crate::screenshot::take(&source, &path) {
+                Ok((w, h)) => {
+                    let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+                    notify(Notice {
+                        kind: NoticeKind::ReplaySaved,
+                        title: tr!("Скриншот сохранён", "Screenshot saved", "Скриншот збережено").into(),
+                        detail: format!("{w}x{h} · {}", util::format_bytes(size)),
+                    });
+                }
+                Err(e) => {
+                    log::error!("screenshot {}: {e}", path.display());
+                    notify(Notice { kind: NoticeKind::Error, title: tr!("Не удалось сделать скриншот", "Could not take a screenshot", "Не вдалося зробити скриншот").into(), detail: e });
+                }
+            }
+        });
+    }
+
+    fn output_path_ext(&self, kind: &str, ext: &str) -> PathBuf {
         let label = self.pipeline.as_ref().map(|p| p.label.clone()).unwrap_or_else(|| "Desktop".into());
         let window_source = matches!(self.config.source, crate::config::CaptureSource::Window { .. });
         let foreground = if self.config.game_folders && !window_source { sources::foreground_program() } else { None };
         let (dir, base) = clip_location(&self.config.output_dir, self.config.game_folders, window_source, &label, foreground.as_deref(), kind, &util::timestamp_for_file());
         let _ = std::fs::create_dir_all(&dir);
-        let mut p = dir.join(format!("{base}.mp4"));
+        let mut p = dir.join(format!("{base}.{ext}"));
         let mut i = 2;
         while p.exists() {
-            p = dir.join(format!("{base} ({i}).mp4"));
+            p = dir.join(format!("{base} ({i}).{ext}"));
             i += 1;
         }
         p

@@ -1,6 +1,6 @@
 ﻿[package]
 name = "instant-replay"
-version = "1.14.0"
+version = "1.15.0"
 edition = "2021"
 description = "Instant Replay and screen recorder for Windows (WGC + Media Foundation GPU encoding)"
 build = "build.rs"
@@ -21,6 +21,7 @@ rfd = "0.15"
 raw-window-handle = "0.6"
 cpal = "0.18"
 bytemuck = "1"
+png = "0.17"
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 
 [dependencies.windows]
@@ -46,6 +47,8 @@ features = [
     "Win32_Graphics_Dxgi_Common",
     "Win32_Graphics_Gdi",
     "Win32_Media",
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_Networking_WinSock",
     "Win32_Media_Audio",
     "Win32_Media_KernelStreaming",
     "Win32_Media_MediaFoundation",

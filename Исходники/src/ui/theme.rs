@@ -25,6 +25,16 @@ pub mod color {
     pub const ACTION: Color32 = Color32::from_rgb(0xf5, 0xf5, 0xf7);
     pub const ACTION_PRESSED: Color32 = Color32::from_rgb(0xd2, 0xd2, 0xd7);
     pub const ACTION_LABEL: Color32 = Color32::from_rgb(0x00, 0x00, 0x00);
+    /// Main window: graphite like the overlay panel, the menu column a step darker.
+    pub const WINDOW: Color32 = Color32::from_rgb(0x16, 0x16, 0x17);
+    pub const SIDEBAR: Color32 = Color32::from_rgb(0x11, 0x11, 0x12);
+    /// Cards and grouped lists on the window, outlined by a faint light line.
+    pub const CARD: Color32 = Color32::from_rgb(0x1e, 0x1e, 0x20);
+    pub const CARD_BORDER: Color32 = Color32::from_rgba_premultiplied(15, 15, 15, 15);
+    /// Fields inside cards: dropdowns, segmented controls, keycaps, menus.
+    pub const FIELD: Color32 = Color32::from_rgb(0x2a, 0x2a, 0x2c);
+    pub const FIELD_HOVER: Color32 = Color32::from_rgb(0x32, 0x32, 0x35);
+    pub const FIELD_PRESSED: Color32 = Color32::from_rgb(0x3a, 0x3a, 0x3d);
 }
 
 pub mod space {
@@ -127,6 +137,8 @@ pub mod glyph {
     pub const WARNING: &str = "\u{E7BA}";
     pub const CHEVRON_DOWN: &str = "\u{E70D}";
     pub const CHEVRON_RIGHT: &str = "\u{E76C}";
+    pub const CHEVRON_LEFT: &str = "\u{E76B}";
+    pub const CAMERA: &str = "\u{E722}";
     pub const CHECK: &str = "\u{E73E}";
     pub const MONITOR: &str = "\u{E7F4}";
     pub const WINDOW: &str = "\u{E737}";
@@ -196,9 +208,9 @@ pub fn install(ctx: &egui::Context, reduced_motion: bool) {
     style.text_styles.insert(egui::TextStyle::Heading, title());
     let v = &mut style.visuals;
     *v = egui::Visuals::dark();
-    v.panel_fill = color::CANVAS;
-    v.window_fill = color::SURFACE_RAISED;
-    v.extreme_bg_color = color::SURFACE_RAISED;
+    v.panel_fill = color::WINDOW;
+    v.window_fill = color::FIELD;
+    v.extreme_bg_color = color::FIELD;
     v.faint_bg_color = color::SURFACE;
     v.override_text_color = Some(color::TEXT);
     v.hyperlink_color = color::FOCUS;
@@ -218,14 +230,14 @@ pub fn install(ctx: &egui::Context, reduced_motion: bool) {
     v.widgets.noninteractive.bg_fill = color::SURFACE;
     v.widgets.noninteractive.fg_stroke = egui::Stroke::new(1.0_f32, color::TEXT_SECONDARY);
     v.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0_f32, color::HAIRLINE);
-    v.widgets.inactive.bg_fill = color::SURFACE_RAISED;
-    v.widgets.inactive.weak_bg_fill = color::SURFACE_RAISED;
-    v.widgets.hovered.bg_fill = color::SURFACE_HOVER;
-    v.widgets.hovered.weak_bg_fill = color::SURFACE_HOVER;
-    v.widgets.active.bg_fill = color::SURFACE_PRESSED;
-    v.widgets.active.weak_bg_fill = color::SURFACE_PRESSED;
-    v.widgets.open.bg_fill = color::SURFACE_HOVER;
-    v.widgets.open.weak_bg_fill = color::SURFACE_HOVER;
+    v.widgets.inactive.bg_fill = color::FIELD;
+    v.widgets.inactive.weak_bg_fill = color::FIELD;
+    v.widgets.hovered.bg_fill = color::FIELD_HOVER;
+    v.widgets.hovered.weak_bg_fill = color::FIELD_HOVER;
+    v.widgets.active.bg_fill = color::FIELD_PRESSED;
+    v.widgets.active.weak_bg_fill = color::FIELD_PRESSED;
+    v.widgets.open.bg_fill = color::FIELD_HOVER;
+    v.widgets.open.weak_bg_fill = color::FIELD_HOVER;
     // Text is never selectable here: selectable labels swallow clicks on clickable rows.
     style.interaction.selectable_labels = false;
     ctx.set_style(style);

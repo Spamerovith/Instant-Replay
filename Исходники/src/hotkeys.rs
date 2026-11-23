@@ -17,10 +17,12 @@ pub enum Action {
     ToggleRecording,
     ToggleReplay,
     ToggleOverlay,
+    Screenshot,
+    ToggleHud,
 }
 
 impl Action {
-    pub const ALL: [Action; 5] = [Action::SaveReplay, Action::SaveLast, Action::ToggleRecording, Action::ToggleReplay, Action::ToggleOverlay];
+    pub const ALL: [Action; 7] = [Action::SaveReplay, Action::SaveLast, Action::ToggleRecording, Action::ToggleReplay, Action::ToggleOverlay, Action::Screenshot, Action::ToggleHud];
     fn id(self) -> i32 {
         match self {
             Action::SaveReplay => 1,
@@ -28,6 +30,8 @@ impl Action {
             Action::ToggleReplay => 3,
             Action::ToggleOverlay => 4,
             Action::SaveLast => 5,
+            Action::Screenshot => 6,
+            Action::ToggleHud => 7,
         }
     }
     fn from_id(id: i32) -> Option<Action> {

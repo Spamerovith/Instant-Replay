@@ -178,7 +178,7 @@ pub fn segmented(ui: &mut Ui, id: &str, options: &[(&str, bool)], selected: &mut
     let total = vec2(seg_w * options.len() as f32 + 6.0, size::SEGMENTED_H);
     let (rect, _) = ui.allocate_exact_size(total, Sense::hover());
     let painter = ui.painter().clone();
-    painter.rect_filled(rect, Rounding::same(radius::INPUT), color::SURFACE_RAISED);
+    painter.rect_filled(rect, Rounding::same(radius::INPUT), color::FIELD);
     let inner = rect.shrink(3.0);
     let base_id = Id::new(("segmented", id));
     let target_x = inner.left() + seg_w * (*selected).min(options.len().saturating_sub(1)) as f32;
@@ -193,7 +193,7 @@ pub fn segmented(ui: &mut Ui, id: &str, options: &[(&str, bool)], selected: &mut
         let (p, h) = interaction(ui, &resp);
         if i != *selected && *enabled {
             let hr = press_rect(r, p);
-            painter.rect_filled(hr, Rounding::same(radius::INPUT - 3.0), lerp_color(Color32::TRANSPARENT, color::SURFACE_HOVER, h.max(p)));
+            painter.rect_filled(hr, Rounding::same(radius::INPUT - 3.0), lerp_color(Color32::TRANSPARENT, color::FIELD_HOVER, h.max(p)));
         }
         if resp.clicked() && *enabled && i != *selected {
             *selected = i;
@@ -274,8 +274,8 @@ pub fn keycap(ui: &mut Ui, text: &str, state: KeycapState) -> Response {
     let resp = resp.on_hover_cursor(CursorIcon::PointingHand);
     let (p, h) = interaction(ui, &resp);
     let r = press_rect(rect, p);
-    let fill = lerp_color(color::SURFACE_RAISED, color::SURFACE_HOVER, h);
-    let fill = lerp_color(fill, color::SURFACE_PRESSED, p);
+    let fill = lerp_color(color::FIELD, color::FIELD_HOVER, h);
+    let fill = lerp_color(fill, color::FIELD_PRESSED, p);
     let stroke = match state {
         KeycapState::Idle => Stroke::new(1.0_f32, color::HAIRLINE),
         KeycapState::Listening => Stroke::new(2.0_f32, color::FOCUS),
@@ -305,7 +305,8 @@ pub fn group(ui: &mut Ui, title: Option<&str>, add: impl FnOnce(&mut GroupUi)) {
         ui.add_space(space::S8 - ui.spacing().item_spacing.y);
     }
     egui::Frame::none()
-        .fill(color::SURFACE)
+        .fill(color::CARD)
+        .stroke(Stroke::new(1.0_f32, color::CARD_BORDER))
         .rounding(Rounding::same(radius::GROUP))
         .inner_margin(egui::Margin::symmetric(space::S16, 0.0))
         .show(ui, |ui| {

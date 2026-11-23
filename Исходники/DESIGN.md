@@ -28,9 +28,14 @@ Single source of interface values. Code mirror: `src/ui/theme.rs` (keep in sync)
 
 | Token | Value | Use |
 | --- | --- | --- |
-| `canvas` | `#000000` | Window background, sidebar |
-| `surface` | `#161617` | Groups, cards |
-| `surface-raised` | `#1d1d1f` | Inputs, dropdowns, keycaps, menus, overlay toast |
+| `canvas` | `#000000` | Video stage behind clips (player, quick view) |
+| `window` | `#161617` | Main window page background (graphite, same tone as the overlay panel) |
+| `sidebar` | `#111112` | Menu column, a step darker; a `card-border` hairline separates it from the page |
+| `card` | `#1e1e20` | Cards and grouped lists on the window, 1 px `card-border` outline |
+| `card-border` | white 6 % | Card outline, sidebar divider |
+| `field` / `field-hover` / `field-pressed` | `#2a2a2c` / `#323235` / `#3a3a3d` | Dropdowns, segmented track, keycaps, menus (one step lighter than the card they sit on) |
+| `surface` | `#161617` | Overlay panel, quick view, modal cards |
+| `surface-raised` | `#1d1d1f` | Overlay toast, HUD row, quick-view arrows, thumbnail placeholders |
 | `surface-hover` | `#232325` | Hover fill on rows/controls on surface |
 | `surface-pressed` | `#2a2a2c` | Pressed fill step |
 | `text` | `#f5f5f7` | Primary text |
@@ -82,7 +87,8 @@ Gap between groups 24. Group title → group 8. Proximity: inside control < betw
 | `slider` track / thumb | 4 / 18 |
 | `nav-item` height | 36, sidebar width 220 |
 | `overlay` panel | width 400, full work-area height, `surface` fill, rows 48 / 56 with hotkey line, gallery tiles 72 high (3 per row) |
-| `quick view` | overlay clip player: window centred on the game's monitor, 72 % of the work-area width (max 85 % height), `surface` fill, padding 20; header (icon + game, file name / resolution + size), 16:9 stage with `input` radius, control row 40 (play, seek track 4 with 12 thumb, time, volume slider 96, folder, delete); Ctrl + wheel zooms 100-800 %, drag pans, double-click resets |
+| `quick view` | overlay clip player: window centred on the game's monitor, 72 % of the work-area width (max 85 % height), `surface` fill, padding 20; header (icon + game, file name / resolution + size), 16:9 stage with `input` radius, control row 40 (play, seek track 4 with 12 thumb, time, volume slider 96, folder, delete); Ctrl + wheel zooms 100-800 %, drag pans, double-click resets; opens paused; 44 px round `surface-raised` arrows in 56 px columns left and right of the picture step through clips; camera button saves the frame |
+| `hud` | performance row over the game: pill 30 high, `surface-raised` at 82 % + white 10 % hairline, labels 11 semibold `text-secondary`, values 14 semibold `text`, segments 21 apart with a white 16 % divider; 16 from the chosen monitor corner (top right by default; the toast then moves 38 lower); out of capture unless "visible in recordings" |
 | `keycap` height / min width | 30 / 168 (one width for the whole column) |
 
 ## Motion

@@ -134,6 +134,8 @@ pub struct Config {
     pub hotkey_record: Hotkey,
     pub hotkey_toggle_replay: Hotkey,
     pub hotkey_overlay: Hotkey,
+    pub hotkey_screenshot: Hotkey,
+    pub hotkey_hud: Hotkey,
 
     pub output_dir: PathBuf,
     pub autostart: bool,
@@ -146,6 +148,23 @@ pub struct Config {
     /// The overlay shows up in screen sharing (Discord, OBS) and screenshots. It then also gets
     /// into a recording of the whole monitor.
     pub overlay_visible_in_capture: bool,
+
+    /// Performance counter over the game (FPS, GPU, CPU...).
+    pub hud_enabled: bool,
+    /// 0 top left, 1 top right, 2 bottom left, 3 bottom right.
+    pub hud_corner: u8,
+    pub hud_fps: bool,
+    /// Smart input-to-screen latency.
+    pub hud_latency: bool,
+    pub hud_display_latency: bool,
+    pub hud_ping: bool,
+    pub hud_frame_time: bool,
+    pub hud_gpu: bool,
+    pub hud_cpu: bool,
+    pub hud_ram: bool,
+    pub hud_clock: bool,
+    /// The counter gets into recordings, screenshots and screen sharing.
+    pub hud_in_capture: bool,
 
     /// Interface language ("ru" / "en" / "uk"); `None` until the first-run choice.
     pub language: Option<String>,
@@ -190,6 +209,8 @@ impl Default for Config {
             hotkey_record: Hotkey::new(VK_F9, true, true, false),
             hotkey_toggle_replay: Hotkey::new(VK_F8, true, true, false),
             hotkey_overlay: Hotkey::new(0x5A, true, true, false), // Ctrl+Alt+Z
+            hotkey_screenshot: Hotkey::new(0x70, false, true, false), // Alt+F1
+            hotkey_hud: Hotkey::new(0x52, false, true, false), // Alt+R
             output_dir: util::default_videos_dir(),
             autostart: false,
             start_minimized: false,
@@ -198,6 +219,18 @@ impl Default for Config {
             notify_sound: true,
             game_folders: true,
             overlay_visible_in_capture: true,
+            hud_enabled: false,
+            hud_corner: 1,
+            hud_fps: true,
+            hud_latency: true,
+            hud_display_latency: false,
+            hud_ping: false,
+            hud_frame_time: false,
+            hud_gpu: true,
+            hud_cpu: true,
+            hud_ram: false,
+            hud_clock: false,
+            hud_in_capture: false,
             language: None,
             skip_version: String::new(),
             profiles: Vec::new(),

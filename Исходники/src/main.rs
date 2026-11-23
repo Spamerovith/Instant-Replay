@@ -11,12 +11,14 @@ mod encoder;
 mod engine;
 mod gpu;
 mod hotkeys;
+mod hud;
 mod icon;
 mod media;
 mod overlay;
 mod player;
 mod recycle;
 mod replay;
+mod screenshot;
 mod sound;
 mod thumbs;
 mod tools;
@@ -93,6 +95,7 @@ fn main() {
 
     tray::enable_dark_menus();
     overlay::start();
+    hud::start(&cfg);
 
     let shared = UiShared::new(!start_hidden);
 
@@ -126,6 +129,8 @@ fn main() {
             (Action::ToggleRecording, cfg.hotkey_record),
             (Action::ToggleReplay, cfg.hotkey_toggle_replay),
             (Action::ToggleOverlay, cfg.hotkey_overlay),
+            (Action::Screenshot, cfg.hotkey_screenshot),
+            (Action::ToggleHud, cfg.hotkey_hud),
         ];
         hotkeys::Hotkeys::start(bindings, move |a| match a {
             Action::SaveReplay => engine.send(Command::SaveReplay),
@@ -136,6 +141,13 @@ fn main() {
                 engine.send(Command::ToggleRecording);
             }
             Action::ToggleReplay => engine.send(Command::ToggleReplay),
+            Action::Screenshot => engine.send(Command::Screenshot(0)),
+            Action::ToggleHud => {
+                hud::toggle();
+                if let Some(ctx) = EGUI_CTX.get() {
+                    ctx.request_repaint();
+                }
+            }
             Action::ToggleOverlay => {
                 shared_hk.request_overlay();
                 if let Some(ctx) = EGUI_CTX.get() {

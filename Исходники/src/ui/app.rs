@@ -297,12 +297,13 @@ impl UiShared {
 /// width, a 16:9 picture plus header and controls, at most 85 % of the height.
 fn quick_card_size(ww: f32, wh: f32, k: f32) -> (f32, f32) {
     let chrome = (20.0 * 2.0 + 32.0 + 4.0 + 18.0 + 12.0 + 12.0 + 40.0) * k; // padding, header, controls
+    let side = (40.0 + 2.0 * super::quick::ARROW_COL) * k; // padding and the arrow columns
     let mut w = (ww * 0.72).round();
-    let mut h = (w - 40.0 * k) * 9.0 / 16.0 + chrome;
+    let mut h = (w - side) * 9.0 / 16.0 + chrome;
     let max_h = (wh * 0.85).round();
     if h > max_h {
         h = max_h;
-        w = (h - chrome) * 16.0 / 9.0 + 40.0 * k;
+        w = (h - chrome) * 16.0 / 9.0 + side;
     }
     (w.round(), h.round())
 }
@@ -377,6 +378,9 @@ pub struct App {
     viewer_prefs: ViewerPrefs,
     /// Clip playing in the overlay's quick view.
     quick: Option<super::quick::QuickView>,
+    /// Clips the quick view steps through with its arrows, and the one shown.
+    quick_list: Vec<crate::engine::ClipInfo>,
+    quick_index: usize,
     /// Newest clips on disk for the overlay gallery (all time).
     overlay_clips: Vec<crate::engine::ClipInfo>,
     overlay_clips_at: Option<Instant>,
@@ -437,6 +441,8 @@ impl App {
             viewer: None,
             viewer_prefs: ViewerPrefs::default(),
             quick: None,
+            quick_list: Vec::new(),
+            quick_index: 0,
             overlay_clips: Vec::new(),
             overlay_clips_at: None,
             home_clips: Vec::new(),
@@ -472,6 +478,8 @@ impl App {
             (Action::ToggleRecording, c.hotkey_record),
             (Action::ToggleReplay, c.hotkey_toggle_replay),
             (Action::ToggleOverlay, c.hotkey_overlay),
+            (Action::Screenshot, c.hotkey_screenshot),
+            (Action::ToggleHud, c.hotkey_hud),
         ]
     }
 
@@ -494,6 +502,7 @@ impl App {
             crate::autostart::set(self.cfg.autostart);
         }
         self.cfg.save();
+        crate::hud::configure(&self.cfg);
         self.engine.send(Command::ApplyConfig(Box::new(self.cfg.clone())));
         self.applied = self.cfg.clone();
     }
@@ -524,6 +533,11 @@ impl eframe::App for App {
         if status.replay_enabled != self.applied.replay_enabled {
             self.applied.replay_enabled = status.replay_enabled;
             self.cfg.replay_enabled = status.replay_enabled;
+        }
+        let hud_on = crate::hud::enabled();
+        if hud_on != self.applied.hud_enabled && self.changed_at.is_none() {
+            self.applied.hud_enabled = hud_on;
+            self.cfg.hud_enabled = hud_on;
         }
 
         self.poll_thumbs(ctx);
@@ -614,10 +628,13 @@ impl eframe::App for App {
         egui::SidePanel::left("nav")
             .exact_width(size::SIDEBAR_W)
             .resizable(false)
-            .frame(egui::Frame::none().fill(color::CANVAS).inner_margin(egui::Margin { left: space::S16, right: space::S8, top: space::S24, bottom: space::S16 }))
+            .frame(egui::Frame::none().fill(color::SIDEBAR).inner_margin(egui::Margin { left: space::S16, right: space::S8, top: space::S24, bottom: space::S16 }))
             .show(ctx, |ui| self.sidebar(ui, &status));
 
-        egui::CentralPanel::default().frame(egui::Frame::none().fill(color::CANVAS)).show(ctx, |ui| {
+        egui::CentralPanel::default().frame(egui::Frame::none().fill(color::WINDOW)).show(ctx, |ui| {
+            // Hairline between the menu column and the page, like the overlay's dividers.
+            let edge = ui.max_rect();
+            ui.painter().vline(edge.left(), edge.y_range(), egui::Stroke::new(1.0_f32, color::CARD_BORDER));
             let t = ((self.page_changed.elapsed().as_secs_f32()) / w::dur(theme::motion::PAGE).max(0.0001)).clamp(0.0, 1.0);
             if t < 1.0 {
                 ctx.request_repaint();
@@ -699,7 +716,7 @@ impl App {
     fn update_card(&mut self, ui: &mut Ui) {
         let Some(rel) = self.pending_update() else { return };
         let mut act = 0;
-        egui::Frame::none().fill(color::SURFACE).rounding(Rounding::same(radius::GROUP)).inner_margin(egui::Margin::symmetric(space::S16, space::S12)).show(ui, |ui| {
+        egui::Frame::none().fill(color::CARD).stroke(egui::Stroke::new(1.0_f32, color::CARD_BORDER)).rounding(Rounding::same(radius::GROUP)).inner_margin(egui::Margin::symmetric(space::S16, space::S12)).show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
                 ui.label(RichText::new(glyph::DOWNLOAD).font(theme::icon(14.0)).color(color::FOCUS));
@@ -751,7 +768,7 @@ impl App {
             let w = 360.0;
             let card = egui::Rect::from_center_size(screen.center(), vec2(w, 260.0));
             ui.allocate_new_ui(egui::UiBuilder::new().max_rect(card), |ui| {
-                egui::Frame::none().fill(color::SURFACE).rounding(Rounding::same(radius::CARD)).inner_margin(egui::Margin::same(space::S24)).show(ui, |ui| {
+                egui::Frame::none().fill(color::CARD).stroke(egui::Stroke::new(1.0_f32, color::CARD_BORDER)).rounding(Rounding::same(radius::CARD)).inner_margin(egui::Margin::same(space::S24)).show(ui, |ui| {
                     ui.set_width(w - space::S24 * 2.0);
                     ui.label(RichText::new("Язык · Language · Мова").font(theme::title()).color(color::TEXT));
                     ui.add_space(space::S16);
@@ -821,7 +838,7 @@ impl App {
         let y = ui.ctx().animate_value_with_time(egui::Id::new("nav-indicator"), target_y, w::dur(theme::motion::INDICATOR));
         let x0 = ui.cursor().left();
         let ind = egui::Rect::from_min_size(egui::pos2(x0, y), vec2(ui.available_width(), size::NAV_ITEM));
-        ui.painter().rect_filled(ind, Rounding::same(radius::INPUT), color::SURFACE_RAISED);
+        ui.painter().rect_filled(ind, Rounding::same(radius::INPUT), color::CARD);
 
         ui.spacing_mut().item_spacing.y = gap;
         for (p, g, label) in pages() {
@@ -846,9 +863,10 @@ impl App {
         let width = ui.available_width();
 
         // Hero: Instant Replay with the tape bar.
-        egui::Frame::none().fill(color::SURFACE).rounding(Rounding::same(radius::CARD)).inner_margin(egui::Margin::same(space::S24)).show(ui, |ui| {
+        egui::Frame::none().fill(color::CARD).stroke(egui::Stroke::new(1.0_f32, color::CARD_BORDER)).rounding(Rounding::same(radius::CARD)).inner_margin(egui::Margin::same(space::S24)).show(ui, |ui| {
             ui.set_width(width - space::S24 * 2.0);
             ui.horizontal(|ui| {
+                ui.label(RichText::new(glyph::HISTORY).font(theme::icon(16.0)).color(color::TEXT));
                 ui.label(RichText::new(tr!("Буфер повтора", "Replay buffer", "Буфер повтору")).font(theme::headline()).color(color::TEXT));
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     let mut on = self.cfg.replay_enabled;
@@ -891,7 +909,7 @@ impl App {
         ui.add_space(space::S16);
 
         // Recording card.
-        egui::Frame::none().fill(color::SURFACE).rounding(Rounding::same(radius::CARD)).inner_margin(egui::Margin::same(space::S24)).show(ui, |ui| {
+        egui::Frame::none().fill(color::CARD).stroke(egui::Stroke::new(1.0_f32, color::CARD_BORDER)).rounding(Rounding::same(radius::CARD)).inner_margin(egui::Margin::same(space::S24)).show(ui, |ui| {
             ui.set_width(width - space::S24 * 2.0);
             ui.horizontal(|ui| {
                 ui.vertical(|ui| {
@@ -904,7 +922,10 @@ impl App {
                         });
                         ui.label(RichText::new(trf!(["{} записано", "{} recorded", "{} записано"], util::format_bytes(st.recording_bytes))).font(theme::subhead()).color(color::TEXT_SECONDARY));
                     } else {
-                        ui.label(RichText::new(tr!("Запись", "Recording", "Запис")).font(theme::headline()).color(color::TEXT));
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new(glyph::VIDEO).font(theme::icon(16.0)).color(color::TEXT));
+                            ui.label(RichText::new(tr!("Запись", "Recording", "Запис")).font(theme::headline()).color(color::TEXT));
+                        });
                         ui.label(RichText::new(tr!("Сохраняет всё до остановки", "Saves everything until you stop", "Зберігає все до зупинки")).font(theme::subhead()).color(color::TEXT_SECONDARY));
                     }
                 });
@@ -1066,7 +1087,7 @@ impl App {
             msgs.push(tr!("Новые видеонастройки применятся после остановки записи", "New video settings apply after recording stops", "Нові відеоналаштування застосуються після зупинки запису").into());
         }
         for m in msgs {
-            egui::Frame::none().fill(color::SURFACE).rounding(Rounding::same(radius::GROUP)).inner_margin(egui::Margin::symmetric(space::S16, space::S12)).show(ui, |ui| {
+            egui::Frame::none().fill(color::CARD).stroke(egui::Stroke::new(1.0_f32, color::CARD_BORDER)).rounding(Rounding::same(radius::GROUP)).inner_margin(egui::Margin::symmetric(space::S16, space::S12)).show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 ui.horizontal_wrapped(|ui| {
                     ui.label(RichText::new(glyph::WARNING).font(theme::icon(14.0)).color(color::WARNING));
@@ -1332,6 +1353,8 @@ impl App {
             Action::ToggleRecording => &mut self.cfg.hotkey_record,
             Action::ToggleReplay => &mut self.cfg.hotkey_toggle_replay,
             Action::ToggleOverlay => &mut self.cfg.hotkey_overlay,
+            Action::Screenshot => &mut self.cfg.hotkey_screenshot,
+            Action::ToggleHud => &mut self.cfg.hotkey_hud,
         }
     }
 
@@ -1345,6 +1368,8 @@ impl App {
             (Action::ToggleRecording, tr!("Начать / остановить запись", "Start / stop recording", "Почати / зупинити запис")),
             (Action::ToggleReplay, tr!("Включить / выключить Instant Replay", "Turn Instant Replay on / off", "Увімкнути / вимкнути Instant Replay")),
             (Action::ToggleOverlay, tr!("Открыть / закрыть оверлей", "Open / close overlay", "Відкрити / закрити оверлей")),
+            (Action::Screenshot, tr!("Скриншот", "Screenshot", "Скриншот")),
+            (Action::ToggleHud, tr!("Показать / скрыть счётчик FPS", "Show / hide the FPS counter", "Показати / сховати лічильник FPS")),
         ];
         let mut start: Option<Action> = None;
         w::group(ui, None, |g| {
@@ -1355,6 +1380,8 @@ impl App {
                     Action::ToggleRecording => self.cfg.hotkey_record,
                     Action::ToggleReplay => self.cfg.hotkey_toggle_replay,
                     Action::ToggleOverlay => self.cfg.hotkey_overlay,
+                    Action::Screenshot => self.cfg.hotkey_screenshot,
+                    Action::ToggleHud => self.cfg.hotkey_hud,
                 };
                 let listening = self.capturing == Some(a);
                 let conflict = failed.contains(&a) && !listening && hk == self.applied_hotkey(a);
@@ -1412,6 +1439,8 @@ impl App {
             Action::ToggleRecording => self.applied.hotkey_record,
             Action::ToggleReplay => self.applied.hotkey_toggle_replay,
             Action::ToggleOverlay => self.applied.hotkey_overlay,
+            Action::Screenshot => self.applied.hotkey_screenshot,
+            Action::ToggleHud => self.applied.hotkey_hud,
         }
     }
 
@@ -1475,6 +1504,76 @@ impl App {
                 )),
                 |ui| {
                     w::switch(ui, &mut self.cfg.overlay_visible_in_capture, tr!("Виден в демонстрации экрана", "Visible in screen sharing", "Видно в демонстрації екрана"));
+                },
+            );
+        });
+        ui.add_space(space::S24);
+        let hud_key = hotkeys::describe(&self.cfg.hotkey_hud);
+        w::group(ui, Some(tr!("Счётчик FPS", "FPS counter", "Лічильник FPS")), |g| {
+            let sub = trf!(["Поверх игры, {} - показать или скрыть", "Over the game, {} shows or hides it", "Поверх гри, {} - показати або сховати"], hud_key);
+            g.row(tr!("Показывать счётчик", "Show the counter", "Показувати лічильник"), Some(&sub), |ui| {
+                w::switch(ui, &mut self.cfg.hud_enabled, tr!("Показывать счётчик", "Show the counter", "Показувати лічильник"));
+            });
+            g.row(tr!("Положение", "Position", "Положення"), None, |ui| {
+                let opts = [
+                    (tr!("Слева вверху", "Top left", "Ліворуч угорі"), true),
+                    (tr!("Справа вверху", "Top right", "Праворуч угорі"), true),
+                    (tr!("Слева внизу", "Bottom left", "Ліворуч унизу"), true),
+                    (tr!("Справа внизу", "Bottom right", "Праворуч унизу"), true),
+                ];
+                let mut sel = self.cfg.hud_corner.min(3) as usize;
+                if w::segmented(ui, "hud-corner", &opts, &mut sel) {
+                    self.cfg.hud_corner = sel as u8;
+                }
+            });
+            g.row(tr!("FPS", "FPS", "FPS"), Some(tr!("Сколько новых кадров игра выводит в секунду", "How many new frames the game shows per second", "Скільки нових кадрів гра виводить за секунду")), |ui| {
+                w::switch(ui, &mut self.cfg.hud_fps, "FPS");
+            });
+            g.row(
+                tr!("Задержка (LAT)", "Latency (LAT)", "Затримка (LAT)"),
+                Some(tr!(
+                    "От нажатия до экрана: кадры игры и ожидание экрана по меткам времени Windows",
+                    "From input to the screen: the game's frames and the wait for the screen, from Windows timestamps",
+                    "Від натискання до екрана: кадри гри та очікування екрана за мітками часу Windows"
+                )),
+                |ui| {
+                    w::switch(ui, &mut self.cfg.hud_latency, "LAT");
+                },
+            );
+            g.row(
+                tr!("Задержка вывода (DISP)", "Display latency (DISP)", "Затримка виводу (DISP)"),
+                Some(tr!("От готового кадра до экрана", "From a finished frame to the screen", "Від готового кадру до екрана")),
+                |ui| {
+                    w::switch(ui, &mut self.cfg.hud_display_latency, "DISP");
+                },
+            );
+            g.row(
+                tr!("Пинг (PING)", "Ping (PING)", "Пінг (PING)"),
+                Some(tr!("До сервера игры, если сервер отвечает на ping", "To the game's server, when it answers ping", "До сервера гри, якщо сервер відповідає на ping")),
+                |ui| {
+                    w::switch(ui, &mut self.cfg.hud_ping, "PING");
+                },
+            );
+            g.row(tr!("Время кадра (FT)", "Frame time (FT)", "Час кадру (FT)"), Some(tr!("Миллисекунды на кадр", "Milliseconds per frame", "Мілісекунди на кадр")), |ui| {
+                w::switch(ui, &mut self.cfg.hud_frame_time, tr!("Время кадра", "Frame time", "Час кадру"));
+            });
+            g.row(tr!("Загрузка видеокарты", "Graphics card load", "Завантаження відеокарти"), None, |ui| {
+                w::switch(ui, &mut self.cfg.hud_gpu, "GPU");
+            });
+            g.row(tr!("Загрузка процессора", "Processor load", "Завантаження процесора"), None, |ui| {
+                w::switch(ui, &mut self.cfg.hud_cpu, "CPU");
+            });
+            g.row(tr!("Занятая память", "Memory in use", "Зайнята пам'ять"), None, |ui| {
+                w::switch(ui, &mut self.cfg.hud_ram, "RAM");
+            });
+            g.row(tr!("Часы", "Clock", "Годинник"), None, |ui| {
+                w::switch(ui, &mut self.cfg.hud_clock, tr!("Часы", "Clock", "Годинник"));
+            });
+            g.row(
+                tr!("Виден в записи", "Visible in recordings", "Видно в записі"),
+                Some(tr!("Счётчик попадает в клипы, скриншоты и демонстрацию экрана", "The counter gets into clips, screenshots and screen sharing", "Лічильник потрапляє в кліпи, скриншоти та демонстрацію екрана")),
+                |ui| {
+                    w::switch(ui, &mut self.cfg.hud_in_capture, tr!("Виден в записи", "Visible in recordings", "Видно в записі"));
                 },
             );
         });
@@ -1604,6 +1703,12 @@ impl App {
                     self.delete_pending = Some(q.path.clone());
                     self.delete_error = None;
                 }
+                super::quick::QuickAction::Step(d) => {
+                    let i = self.quick_index as i64 + d as i64;
+                    if i >= 0 && (i as usize) < self.quick_list.len() {
+                        self.show_quick(ctx, i as usize);
+                    }
+                }
                 super::quick::QuickAction::None => {}
             }
             return;
@@ -1650,15 +1755,15 @@ impl App {
             } else {
                 let avail = ui.available_width();
                 let tile_w = ((avail - space::S8 * 2.0) / 3.0).floor();
-                let mut picked: Option<std::path::PathBuf> = None;
+                let mut picked: Option<usize> = None;
                 let mut delete_req: Option<std::path::PathBuf> = None;
                 let clips_now = self.overlay_clips.clone();
                 let tile_tex: Vec<Option<egui::TextureId>> = clips_now.iter().map(|c| self.thumb_for(c)).collect();
                 ui.horizontal(|ui| {
-                    for (clip, tex) in self.overlay_clips.iter().zip(tile_tex.iter()) {
+                    for (i, (clip, tex)) in self.overlay_clips.iter().zip(tile_tex.iter()).enumerate() {
                         let resp = gallery_tile(ui, clip, tile_w, size::OVERLAY_TILE_H, *tex);
                         if resp.clicked() {
-                            picked = Some(clip.path.clone());
+                            picked = Some(i);
                         }
                         resp.context_menu(|ui| {
                             if clip_menu(ui, &clip.path) {
@@ -1671,8 +1776,15 @@ impl App {
                     self.delete_pending = delete_req;
                     self.delete_error = None;
                 }
-                if let Some(p) = picked {
-                    self.open_from_overlay(ctx, &p);
+                if let Some(i) = picked {
+                    // The arrows go on through every clip, not only the three tiles.
+                    let all = crate::engine::scan_clips(&self.cfg.output_dir, 300);
+                    let path = &clips_now[i].path;
+                    let idx = all.iter().position(|c| &c.path == path);
+                    match idx {
+                        Some(idx) => self.open_from_overlay(ctx, all, idx),
+                        None => self.open_from_overlay(ctx, clips_now.clone(), i),
+                    }
                 }
             }
             ui.add_space(space::S8);
@@ -1693,6 +1805,19 @@ impl App {
             });
             if toggle_rec {
                 self.engine.send(Command::ToggleRecording);
+            }
+
+            // Screenshot: the overlay closes first, so the picture shows the game only.
+            let shot_sub = trf!(["{} - скриншот", "{} - screenshot", "{} - скриншот"], hotkeys::describe(&self.cfg.hotkey_screenshot));
+            let mut shoot = false;
+            overlay_row(ui, glyph::CAMERA, tr!("Скриншот", "Screenshot", "Скриншот"), Some(&shot_sub), |ui| {
+                if w::icon_button(ui, glyph::CAMERA, tr!("Сделать скриншот", "Take a screenshot", "Зробити скриншот")).clicked() {
+                    shoot = true;
+                }
+            });
+            if shoot {
+                self.exit_overlay(ctx, false);
+                self.engine.send(Command::Screenshot(350));
             }
 
             // Instant Replay
@@ -1918,6 +2043,7 @@ impl App {
                     self.thumb_tex.remove(&path);
                     self.overlay_clips_at = None;
                     self.home_clips.retain(|c| c.path != path);
+                    self.quick_list.retain(|c| c.path != path);
                     self.home_clips_at = None;
                     self.delete_pending = None;
                     self.delete_error = None;
@@ -2131,10 +2257,19 @@ fn clip_thumb(ui: &mut Ui, tex: Option<egui::TextureId>, is_replay: bool, size: 
 impl App {
     /// Opens a clip from the overlay in the quick view: it plays right over the game, the overlay
     /// window grows into a card in the middle of the monitor. Closing it brings the panel back.
-    fn open_from_overlay(&mut self, ctx: &egui::Context, path: &std::path::Path) {
-        let bytes = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
-        self.quick = Some(super::quick::QuickView::open(ctx, path, bytes, &self.viewer_prefs));
+    fn open_from_overlay(&mut self, ctx: &egui::Context, list: Vec<crate::engine::ClipInfo>, index: usize) {
+        self.quick_list = list;
+        self.show_quick(ctx, index);
         self.shared.overlay_quick_rect();
+    }
+
+    /// Shows clip `index` of the quick-view list (the previous player stops first).
+    fn show_quick(&mut self, ctx: &egui::Context, index: usize) {
+        let Some(clip) = self.quick_list.get(index).cloned() else { return };
+        self.quick = None;
+        self.quick_index = index;
+        let (prev, next) = (index > 0, index + 1 < self.quick_list.len());
+        self.quick = Some(super::quick::QuickView::open(ctx, &clip.path, clip.bytes, &self.viewer_prefs, prev, next));
         ctx.request_repaint();
     }
 
@@ -2147,7 +2282,7 @@ impl App {
         let mut back = false;
         let mut close = false;
         let mut folder = false;
-        let mut picked: Option<std::path::PathBuf> = None;
+        let mut picked: Option<(Vec<crate::engine::ClipInfo>, usize)> = None;
         let mut delete_req: Option<std::path::PathBuf> = None;
         let all_clips = self.gallery_clips.clone();
         let games = crate::engine::clip_games(&all_clips);
@@ -2217,7 +2352,7 @@ impl App {
                             let tex = self.thumb_for(clip);
                             let resp = gallery_tile(ui, clip, tile_w, tile_h, tex);
                             if resp.clicked() {
-                                picked = Some(clip.path.clone());
+                                picked = Some((clips.clone(), r * 2 + c));
                             }
                             resp.context_menu(|ui| {
                                 if clip_menu(ui, &clip.path) {
@@ -2246,8 +2381,8 @@ impl App {
         }
         if close {
             self.exit_overlay(ctx, false);
-        } else if let Some(p) = picked {
-            self.open_from_overlay(ctx, &p);
+        } else if let Some((list, i)) = picked {
+            self.open_from_overlay(ctx, list, i);
         }
     }
 }

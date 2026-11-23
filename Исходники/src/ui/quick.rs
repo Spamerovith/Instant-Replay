@@ -22,7 +22,13 @@ pub enum QuickAction {
     None,
     Close,
     Delete,
+    /// Show the previous (-1) or next (+1) clip of the list.
+    Step(i32),
 }
+
+/// Width of the side arrows' column next to the picture.
+pub const ARROW_COL: f32 = 56.0;
+const ARROW_D: f32 = 44.0;
 
 pub struct QuickView {
     pub path: PathBuf,
@@ -39,10 +45,16 @@ pub struct QuickView {
     zoom: f32,
     center: Vec2,
     dragged: bool,
+    /// Can step to the previous / next clip.
+    has_prev: bool,
+    has_next: bool,
+    /// Result of the last frame screenshot and when it arrived (shown for a moment).
+    shot: Arc<parking_lot::Mutex<Option<Result<PathBuf, String>>>>,
+    shot_note: Option<(Result<PathBuf, String>, std::time::Instant)>,
 }
 
 impl QuickView {
-    pub fn open(ctx: &egui::Context, path: &Path, bytes: u64, prefs: &ViewerPrefs) -> Self {
+    pub fn open(ctx: &egui::Context, path: &Path, bytes: u64, prefs: &ViewerPrefs, has_prev: bool, has_next: bool) -> Self {
         let game = crate::engine::clip_game(path);
         let mut q = QuickView {
             path: path.to_path_buf(),
@@ -58,6 +70,10 @@ impl QuickView {
             zoom: 1.0,
             center: vec2(0.5, 0.5),
             dragged: false,
+            has_prev,
+            has_next,
+            shot: Arc::new(parking_lot::Mutex::new(None)),
+            shot_note: None,
         };
         if !path.is_file() {
             q.error = Some(tr!("Файл не найден - возможно, его переместили или удалили", "File not found - it may have been moved or deleted", "Файл не знайдено - можливо, його перемістили або видалили").into());
@@ -71,7 +87,9 @@ impl QuickView {
                 if let Some(a) = &q.audio {
                     a.set_volume(if prefs.muted { 0.0 } else { prefs.volume });
                 }
-                q.player = Some(Player::new(path, info, q.audio.clone(), ctx, [2560, 1600], 1.0, false));
+                let mut pl = Player::new(path, info, q.audio.clone(), ctx, [2560, 1600], 1.0, false);
+                pl.set_paused(true); // opens on the first frame, a click starts it
+                q.player = Some(pl);
             }
             Err(e) => q.error = Some(e),
         }
@@ -130,17 +148,32 @@ impl QuickView {
             ui.add_space(space::S12);
 
             let avail = ui.available_rect_before_wrap();
-            let stage = Rect::from_min_max(avail.min, pos2(avail.right(), avail.bottom() - CONTROLS_H - space::S12));
+            let full = Rect::from_min_max(avail.min, pos2(avail.right(), avail.bottom() - CONTROLS_H - space::S12));
+            let stage = full.shrink2(vec2(ARROW_COL, 0.0));
             self.stage(ui, stage);
+            // Arrows left and right of the picture: previous / next clip.
+            for (dir, enabled, g, name) in [
+                (-1, self.has_prev, glyph::CHEVRON_LEFT, tr!("Предыдущий клип  PgUp", "Previous clip  PgUp", "Попередній кліп  PgUp")),
+                (1, self.has_next, glyph::CHEVRON_RIGHT, tr!("Следующий клип  PgDn", "Next clip  PgDn", "Наступний кліп  PgDn")),
+            ] {
+                let cx = if dir < 0 { full.left() + ARROW_COL / 2.0 - space::S4 } else { full.right() - ARROW_COL / 2.0 + space::S4 };
+                let r = Rect::from_center_size(pos2(cx, full.center().y), vec2(ARROW_D, ARROW_D));
+                if side_arrow(ui, r, g, name, enabled, dir) {
+                    action = QuickAction::Step(dir);
+                }
+            }
             let controls = Rect::from_min_max(pos2(avail.left(), stage.bottom() + space::S12), avail.max);
             if self.controls(ui, controls, prefs) {
                 action = QuickAction::Delete;
             }
+            self.shot_toast(ui, stage);
         });
         if !matches!(action, QuickAction::None) {
             return action;
         }
-        self.keys(ctx, prefs);
+        if let Some(step) = self.keys(ctx, prefs) {
+            return QuickAction::Step(step);
+        }
         action
     }
 
@@ -175,8 +208,8 @@ impl QuickView {
                     }
                 }
             }
-            if resp.drag_started() {
-                self.dragged = false;
+            if ctx.input(|i| i.pointer.primary_pressed()) {
+                self.dragged = false; // a new press: a click after a pan still toggles playback
             }
             if resp.dragged() && self.zoom > 1.0 {
                 let d = resp.drag_delta();
@@ -222,6 +255,7 @@ impl QuickView {
     fn controls(&mut self, ui: &mut Ui, row: Rect, prefs: &mut ViewerPrefs) -> bool {
         let ctx = ui.ctx().clone();
         let mut delete = false;
+        let mut shoot: Option<f64> = None;
         let path = self.path.clone();
         let audio = self.audio.clone();
         let Some(pl) = &mut self.player else {
@@ -253,7 +287,7 @@ impl QuickView {
                     pl.toggle();
                 }
                 // Right side first, so the seek bar takes what is left.
-                let right_w = time_w + space::S16 + size::BUTTON_MD * 3.0 + 96.0 + space::S8 * 5.0;
+                let right_w = time_w + space::S16 + size::BUTTON_MD * 4.0 + 96.0 + space::S8 * 6.0;
                 let seek_w = (ui.available_width() - right_w).max(80.0);
                 let (seek_r, seek) = ui.allocate_exact_size(vec2(seek_w, CONTROLS_H), Sense::click_and_drag());
                 let painter = ui.painter().clone();
@@ -320,18 +354,94 @@ impl QuickView {
                     if w::icon_button(ui, glyph::FOLDER, tr!("Открыть расположение", "Show in folder", "Відкрити розташування")).clicked() {
                         util::open_in_explorer(&path, true);
                     }
+                    if pl.has_video() && w::icon_button(ui, glyph::CAMERA, tr!("Скриншот кадра  S", "Frame screenshot  S", "Скриншот кадру  S")).clicked() {
+                        shoot = Some(pl.position());
+                    }
                 });
             });
         });
+        if let Some(at) = shoot {
+            self.shoot_frame(at);
+        }
         delete
     }
 
-    fn keys(&mut self, ctx: &egui::Context, prefs: &mut ViewerPrefs) {
-        if ctx.memory(|m| m.focused().is_some()) {
+    /// Saves the frame at `at` seconds as PNG at the clip's full size (FFmpeg reads it from the
+    /// file, so it is sharper than the picture on screen), next to the clip.
+    fn shoot_frame(&mut self, at: f64) {
+        let Some(ff) = ffmpeg::ffmpeg() else {
+            *self.shot.lock() = Some(Err(ffmpeg::missing().into()));
+            return;
+        };
+        let dir = self.path.parent().map(Path::to_path_buf).unwrap_or_default();
+        let game = util::sanitize_file_name(&crate::engine::clip_game(&self.path));
+        let base = format!("{game} - Screenshot {}", util::timestamp_for_file());
+        let mut out = dir.join(format!("{base}.png"));
+        let mut i = 2;
+        while out.exists() {
+            out = dir.join(format!("{base} ({i}).png"));
+            i += 1;
+        }
+        let (src, slot) = (self.path.clone(), self.shot.clone());
+        std::thread::spawn(move || {
+            let r = ffmpeg::hidden_command(ff)
+                .args(["-v", "error", "-y", "-ss", &format!("{at:.3}"), "-i"])
+                .arg(&src)
+                .args(["-frames:v", "1", "-update", "1"])
+                .arg(&out)
+                .output();
+            *slot.lock() = Some(match r {
+                Ok(o) if o.status.success() && out.is_file() => Ok(out),
+                Ok(o) => Err(String::from_utf8_lossy(&o.stderr).trim().to_string()),
+                Err(e) => Err(e.to_string()),
+            });
+        });
+    }
+
+    /// "Screenshot saved" note over the picture for a couple of seconds.
+    fn shot_toast(&mut self, ui: &mut Ui, stage: Rect) {
+        if let Some(r) = self.shot.lock().take() {
+            self.shot_note = Some((r, std::time::Instant::now()));
+        }
+        let Some((r, at)) = &self.shot_note else { return };
+        let age = at.elapsed().as_secs_f32();
+        if age > 2.6 {
+            self.shot_note = None;
             return;
         }
+        ui.ctx().request_repaint_after(Duration::from_millis(50));
+        let alpha = (1.0 - ((age - 2.2) / 0.4).clamp(0.0, 1.0)) * (age / 0.15).clamp(0.0, 1.0);
+        let (g, text, col) = match r {
+            Ok(p) => (glyph::CHECK, trf!(["Скриншот сохранён: {}", "Screenshot saved: {}", "Скриншот збережено: {}"], p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()), color::SUCCESS),
+            Err(e) => (glyph::WARNING, trf!(["Не удалось сделать скриншот: {}", "Could not take a screenshot: {}", "Не вдалося зробити скриншот: {}"], e), color::WARNING),
+        };
+        let galley = ui.fonts(|f| f.layout_no_wrap(text, theme::subhead(), color::TEXT));
+        let sz = vec2(galley.size().x + 22.0 + space::S16 * 2.0, size::BUTTON_MD + 4.0);
+        let pill = Rect::from_center_size(pos2(stage.center().x, stage.bottom() - space::S16 - sz.y / 2.0), sz);
+        let p = ui.painter();
+        p.rect_filled(pill, Rounding::same(radius::PILL), Color32::from_black_alpha((200.0 * alpha) as u8));
+        p.text(pos2(pill.left() + space::S16, pill.center().y), Align2::LEFT_CENTER, g, theme::icon(13.0), col.gamma_multiply(alpha));
+        p.galley(pos2(pill.left() + space::S16 + 22.0, pill.center().y - galley.size().y / 2.0), galley, color::TEXT.gamma_multiply(alpha));
+    }
+
+    /// Player keys; returns a clip step for PageUp / PageDown.
+    fn keys(&mut self, ctx: &egui::Context, prefs: &mut ViewerPrefs) -> Option<i32> {
+        if ctx.memory(|m| m.focused().is_some()) {
+            return None;
+        }
         let pressed = |k: Key| ctx.input(|i| i.key_pressed(k));
-        let Some(pl) = &mut self.player else { return };
+        if pressed(Key::PageUp) && self.has_prev {
+            return Some(-1);
+        }
+        if pressed(Key::PageDown) && self.has_next {
+            return Some(1);
+        }
+        let Some(pl) = &mut self.player else { return None };
+        if pressed(Key::S) && pl.has_video() {
+            let at = pl.position();
+            self.shoot_frame(at);
+            return None;
+        }
         if pressed(Key::Space) || pressed(Key::K) {
             pl.toggle();
         }
@@ -358,7 +468,29 @@ impl QuickView {
                 a.set_volume(if prefs.muted { 0.0 } else { prefs.volume });
             }
         }
+        None
     }
+}
+
+/// Round arrow button beside the picture; fades out at the ends of the list.
+fn side_arrow(ui: &mut Ui, r: Rect, g: &str, name: &str, enabled: bool, dir: i32) -> bool {
+    let id = Id::new(("quick_arrow", dir));
+    let t = ui.ctx().animate_bool_with_time(id.with("on"), enabled, w::dur(motion::HOVER));
+    if t <= 0.0 {
+        return false;
+    }
+    let resp = ui.interact(r, id, if enabled { Sense::click() } else { Sense::hover() });
+    let resp = if enabled { resp.on_hover_cursor(CursorIcon::PointingHand).on_hover_text(name) } else { resp };
+    let h = ui.ctx().animate_bool_with_time(id.with("h"), resp.hovered() && enabled, w::dur(motion::HOVER));
+    let down = resp.is_pointer_button_down_on();
+    let p = ui.ctx().animate_bool_with_time(id.with("p"), down, w::dur(if down { motion::PRESS_DOWN } else { motion::PRESS_RELEASE }));
+    let rr = Rect::from_center_size(r.center(), r.size() * (1.0 - (1.0 - motion::PRESS_SCALE) * p));
+    let fill = w::lerp_color(color::SURFACE_RAISED, color::SURFACE_HOVER, h);
+    let fill = w::lerp_color(fill, color::SURFACE_PRESSED, p);
+    let painter = ui.painter();
+    painter.circle_filled(rr.center(), rr.width() / 2.0, fill.gamma_multiply(t));
+    painter.text(rr.center(), Align2::CENTER_CENTER, g, theme::icon(16.0), color::TEXT.gamma_multiply(t));
+    enabled && resp.clicked()
 }
 
 /// New zoom and centre so that the picture point under the pointer stays under it. `at` is the

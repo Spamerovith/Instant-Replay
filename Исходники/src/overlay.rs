@@ -144,7 +144,9 @@ unsafe fn begin(n: Notice) {
     let h = (if n.detail.is_empty() { 52.0 } else { 68.0 } * scale) as i32;
     let margin = (24.0 * scale) as i32;
     let r = mi.rcMonitor;
-    let origin = POINT { x: r.right - w - margin, y: r.top + margin };
+    // Below the performance counter when it takes the same corner.
+    let below_hud = if crate::hud::in_top_right() { (38.0 * scale) as i32 } else { 0 };
+    let origin = POINT { x: r.right - w - margin, y: r.top + margin + below_hud };
     st.toast = Some(Toast { notice: n, started: Instant::now(), origin, size: SIZE { cx: w, cy: h }, scale });
     if render().is_ok() {
         let _ = SetWindowPos(st.hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);

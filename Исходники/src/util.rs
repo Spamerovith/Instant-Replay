@@ -77,6 +77,12 @@ pub fn timestamp_for_file() -> String {
     )
 }
 
+/// Local time of day `18:30` (the performance counter's clock).
+pub fn clock_hhmm() -> String {
+    let t = unsafe { windows::Win32::System::SystemInformation::GetLocalTime() };
+    format!("{:02}:{:02}", t.wHour, t.wMinute)
+}
+
 pub fn sanitize_file_name(s: &str) -> String {
     let cleaned: String = s
         .chars()
