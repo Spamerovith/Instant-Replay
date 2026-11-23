@@ -141,6 +141,8 @@ pub struct Config {
     pub autostart: bool,
     pub start_minimized: bool,
     pub close_to_tray: bool,
+    /// Restart with administrator rights at start (exact FPS through the Windows event trace).
+    pub run_as_admin: bool,
     pub notify_overlay: bool,
     pub notify_sound: bool,
     /// Clips go into a folder named after the game (like the NVIDIA overlay does).
@@ -163,8 +165,6 @@ pub struct Config {
     pub hud_cpu: bool,
     pub hud_ram: bool,
     pub hud_clock: bool,
-    /// Frame generation for the counter when a game has no profile value: 1 = off, 2-4 = factor.
-    pub hud_frame_gen: u8,
     /// The counter gets into recordings, screenshots and screen sharing.
     pub hud_in_capture: bool,
 
@@ -217,6 +217,7 @@ impl Default for Config {
             autostart: false,
             start_minimized: false,
             close_to_tray: true,
+            run_as_admin: true,
             notify_overlay: true,
             notify_sound: true,
             game_folders: true,
@@ -232,7 +233,6 @@ impl Default for Config {
             hud_cpu: true,
             hud_ram: false,
             hud_clock: false,
-            hud_frame_gen: 1,
             hud_in_capture: false,
             language: None,
             skip_version: String::new(),
@@ -409,21 +409,18 @@ pub struct GameProfile {
     pub resolution: Resolution,
     pub quality: BitrateQuality,
     pub replay_seconds: u32,
-    /// Frame generation in this game for the FPS counter: 0 = as in the counter settings,
-    /// 1 = off, 2-4 = generated frames per real one (DLSS / FSR frame generation).
-    pub frame_gen: u8,
 }
 
 impl Default for GameProfile {
     fn default() -> Self {
-        GameProfile { exe: String::new(), name: String::new(), fps: 60, resolution: Resolution::Native, quality: BitrateQuality::Standard, replay_seconds: 120, frame_gen: 0 }
+        GameProfile { exe: String::new(), name: String::new(), fps: 60, resolution: Resolution::Native, quality: BitrateQuality::Standard, replay_seconds: 120 }
     }
 }
 
 impl GameProfile {
     /// A new profile starts from the current general settings.
     pub fn from_config(exe: &str, name: &str, c: &Config) -> Self {
-        GameProfile { exe: exe.to_string(), name: name.to_string(), fps: c.fps, resolution: c.resolution, quality: c.bitrate_quality, replay_seconds: c.replay_seconds, frame_gen: 0 }
+        GameProfile { exe: exe.to_string(), name: name.to_string(), fps: c.fps, resolution: c.resolution, quality: c.bitrate_quality, replay_seconds: c.replay_seconds }
     }
 }
 
@@ -491,7 +488,7 @@ mod profile_tests {
     #[test]
     fn profile_overrides_source_and_settings_without_touching_the_base() {
         let base = Config::default();
-        let p = GameProfile { exe: "game.exe".into(), name: "Game".into(), fps: 144, resolution: Resolution::P1440, quality: BitrateQuality::High, replay_seconds: 300, frame_gen: 0 };
+        let p = GameProfile { exe: "game.exe".into(), name: "Game".into(), fps: 144, resolution: Resolution::P1440, quality: BitrateQuality::High, replay_seconds: 300 };
         let c = base.with_profile(&p);
         assert_eq!(c.source, CaptureSource::Window { title: String::new(), exe: "game.exe".into() });
         assert_eq!((c.fps, c.resolution, c.bitrate_quality, c.replay_seconds), (144, Resolution::P1440, BitrateQuality::High, 300));

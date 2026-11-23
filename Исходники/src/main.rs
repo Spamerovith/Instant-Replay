@@ -9,6 +9,8 @@ mod capture;
 mod config;
 mod encoder;
 mod engine;
+mod elevation;
+mod frames;
 mod enctest;
 mod gpu;
 mod hotkeys;
@@ -53,6 +55,29 @@ fn main() {
         log::error!("panic: {info}");
     }));
 
+    // Administrator rights (exact FPS), like AfterCore: restart through UAC before taking the
+    // single-instance lock; declined UAC = go on without them.
+    if std::env::args().any(|a| a == "--quit") {
+        // Closes the running copy (also an elevated one, which taskkill from a normal shell cannot).
+        tray::signal_quit();
+        return;
+    }
+    let tool = std::env::args().any(|a| ["--selftest", "--encode-test"].contains(&a.as_str()));
+    let special = tool || std::env::args().any(|a| ["--elevated-attempt", "--no-elevate", "--updated"].contains(&a.as_str()));
+    if !special && !elevation::is_elevated() && Config::load().run_as_admin {
+        // Already running: just bring it forward, no UAC prompt for that.
+        if tray::signal_existing_instance() {
+            return;
+        }
+        if elevation::relaunch_elevated(&elevation::forward_args()) {
+            return;
+        }
+        log::info!("administrator rights declined: exact FPS is off");
+    }
+    if !tool && elevation::is_elevated() {
+        elevation::remove_old_fps_task();
+    }
+
     unsafe {
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         // Single instance: a second launch just brings the running window forward.
@@ -61,7 +86,7 @@ fn main() {
         let mut tries = 0;
         loop {
             let m = CreateMutexW(None, true, w!("Local\\InstantReplay.SingleInstance"));
-            if GetLastError() == ERROR_ALREADY_EXISTS && !std::env::args().any(|a| a == "--selftest" || a == "--encode-test") {
+            if GetLastError() == ERROR_ALREADY_EXISTS && !std::env::args().any(|a| ["--selftest", "--encode-test"].contains(&a.as_str())) {
                 if updated && tries < 75 {
                     if let Ok(h) = m {
                         let _ = CloseHandle(h);
@@ -324,7 +349,9 @@ mod anticheat_tests {
                 } else if p.extension().map_or(false, |x| x == "rs") {
                     let text = std::fs::read_to_string(&p).unwrap();
                     for f in &forbidden {
-                        if text.contains(f.as_str()) {
+                        // OpenProcessToken(GetCurrentProcess()) reads our own rights: allowed.
+                        let hit = text.match_indices(f.as_str()).any(|(i, _)| !text[i + f.len()..].starts_with("Token"));
+                        if hit {
                             found.push(format!("{}: {f}", p.display()));
                         }
                     }

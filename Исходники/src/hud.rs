@@ -53,17 +53,6 @@ pub struct HudConfig {
     pub ram: bool,
     pub clock: bool,
     pub in_capture: bool,
-    /// Frame generation: the general factor and the games' own (lower-case exe, factor).
-    pub frame_gen: u8,
-    pub game_frame_gen: Vec<(String, u8)>,
-}
-
-impl HudConfig {
-    /// Generated frames per real one for the game `exe` (1 = no frame generation).
-    pub fn frame_gen_for(&self, exe: Option<&str>) -> u8 {
-        let own = exe.and_then(|e| self.game_frame_gen.iter().find(|(x, _)| x.eq_ignore_ascii_case(e)).map(|(_, f)| *f)).filter(|f| *f > 0);
-        own.unwrap_or(self.frame_gen).clamp(1, 4)
-    }
 }
 
 impl HudConfig {
@@ -80,8 +69,7 @@ impl HudConfig {
             ram: c.hud_ram,
             clock: c.hud_clock,
             in_capture: c.hud_in_capture,
-            frame_gen: c.hud_frame_gen,
-            game_frame_gen: c.profiles.iter().map(|p| (p.exe.to_lowercase(), p.frame_gen)).collect(),
+
         }
     }
 }
@@ -202,11 +190,11 @@ pub fn smart_latency(frame_ms: f64, wait_ms: f64, refresh_ms: f64) -> f64 {
 
 /// Smart latency with frame generation: the game's real frame is `fg` shown frames long, and the
 /// generator holds one real frame back to build the in-between pictures.
-pub fn smart_latency_fg(shown_frame_ms: f64, fg: u8, wait_ms: f64, refresh_ms: f64) -> f64 {
-    if fg <= 1 {
+pub fn smart_latency_fg(shown_frame_ms: f64, fg: f64, wait_ms: f64, refresh_ms: f64) -> f64 {
+    if fg <= 1.0 {
         return smart_latency(shown_frame_ms, wait_ms, refresh_ms);
     }
-    let real = shown_frame_ms * fg as f64;
+    let real = shown_frame_ms * fg;
     smart_latency(real, wait_ms, refresh_ms) + real
 }
 
@@ -276,8 +264,6 @@ struct Gauges {
     last: Instant,
     /// Process of the measured game (for the ping), and the ping thread's last result.
     game_pid: Arc<AtomicU32>,
-    /// Executable of the measured game (for its frame generation setting).
-    game_exe: Option<String>,
     ping: Arc<Mutex<Option<f32>>>,
     ping_on: Arc<AtomicBool>,
 }
@@ -321,7 +307,7 @@ impl Gauges {
                 })
                 .ok();
         }
-        Gauges { device, probe: None, probe_at: Instant::now(), last_count: 0, fps: None, pdh: q, gpu_counter: c, cpu_prev: None, last: Instant::now(), game_pid, game_exe: None, ping, ping_on }
+        Gauges { device, probe: None, probe_at: Instant::now(), last_count: 0, fps: None, pdh: q, gpu_counter: c, cpu_prev: None, last: Instant::now(), game_pid, ping, ping_on }
     }
 
     /// Follows the foreground window: a game window is measured itself, the desktop by its monitor.
@@ -339,9 +325,6 @@ impl Gauges {
             }
             let shell = crate::capture::sources::foreground_program().is_none();
             self.game_pid.store(if shell { 0 } else { pid }, Ordering::Relaxed);
-            if self.probe.as_ref().map_or(true, |p| p.target != (if shell { MonitorFromWindow(fg, MONITOR_DEFAULTTOPRIMARY).0 as isize } else { fg.0 as isize })) {
-                self.game_exe = if shell { None } else { crate::capture::sources::foreground_exe() };
-            }
             let monitor = if shell { Some(MonitorFromWindow(fg, MONITOR_DEFAULTTOPRIMARY)) } else { None };
             let target = monitor.map(|m| m.0 as isize).unwrap_or(fg.0 as isize);
             if self.probe.as_ref().map_or(false, |p| p.target == target) {
@@ -358,7 +341,7 @@ impl Gauges {
         }
     }
 
-    fn sample(&mut self, want_ping: bool, cfg: &HudConfig) -> Sample {
+    fn sample(&mut self, want_ping: bool, _cfg: &HudConfig) -> Sample {
         self.ping_on.store(want_ping, Ordering::Relaxed);
         let dt = self.last.elapsed().as_secs_f32().max(0.05);
         self.last = Instant::now();
@@ -431,16 +414,33 @@ impl Gauges {
         if self.fps.map_or(true, |f| f < 1.0) {
             frame_ms = None;
         }
-        // Frame generation: the screen gets `fg` pictures per frame the game really renders.
-        let fg = cfg.frame_gen_for(self.game_exe.as_deref());
+        // Exact FPS from the event trace (AfterCore's tracker): every frame the game presents,
+        // also above the screen's refresh rate; with frame generation the game's own frames come
+        // from its NVIDIA Reflex markers. Without administrator rights: the capture's count.
+        let pid = self.game_pid.load(Ordering::Relaxed);
+        let exact = if pid != 0 { crate::frames::stats(pid) } else { None };
+        let mut fps = self.fps;
+        let mut real_fps = None;
+        let mut fg = 1.0f64;
+        if let Some(st) = &exact {
+            fps = Some(st.fps);
+            if st.frametime_ms > 0.0 {
+                frame_ms = Some(st.frametime_ms as f64);
+            }
+            if st.frame_generation() {
+                if let Some(r) = st.real_fps {
+                    real_fps = Some(r);
+                    fg = (st.fps / r) as f64;
+                }
+            }
+        }
         let latency = match (frame_ms, wait_ms) {
             (Some(f), Some(w)) => Some(smart_latency_fg(f, fg, w, refresh_ms) as f32),
             _ => None,
         };
-        let real_fps = if fg > 1 { self.fps.map(|f| f / fg as f32) } else { None };
         let display = wait_ms.filter(|_| frame_ms.is_some()).map(|w| (w + refresh_ms / 2.0) as f32);
         let ping = *self.ping.lock();
-        Sample { fps: self.fps, real_fps, frame_ms: frame_ms.map(|f| f as f32), latency, display, ping, gpu, cpu, ram }
+        Sample { fps, real_fps, frame_ms: frame_ms.map(|f| f as f32), latency, display, ping, gpu, cpu, ram }
     }
 
     fn stop_probe(&mut self) {
@@ -575,6 +575,7 @@ unsafe fn tick() {
         if let Some(g) = &mut st.gauges {
             g.stop_probe(); // no capture session while the counter is off
         }
+        crate::frames::stop();
         return;
     }
     let cfg = CFG.get().map(|m| m.lock().clone());
@@ -587,6 +588,9 @@ unsafe fn tick() {
     let g = st.gauges.get_or_insert_with(Gauges::new);
     if !(cfg.fps || cfg.frame_time || cfg.latency || cfg.display_latency) {
         g.stop_probe();
+    }
+    if cfg.fps || cfg.frame_time || cfg.latency {
+        crate::frames::ensure_running();
     }
     let sample = g.sample(cfg.ping, &cfg);
     let segs = segments(&sample, &cfg);
@@ -800,14 +804,10 @@ mod tests {
     fn frame_generation_counts_real_frames() {
         // 240 shown fps with 2x frame generation = 120 real fps (8.33 ms real frames).
         let shown = 1000.0 / 240.0;
-        let l = smart_latency_fg(shown, 2, 1.0, 4.17);
+        let l = smart_latency_fg(shown, 2.0, 1.0, 4.17);
         let real = shown * 2.0;
         assert!((l - (2.0 * real + 1.0 + 2.085 + real)).abs() < 0.01);
-        assert_eq!(smart_latency_fg(shown, 1, 1.0, 4.17), smart_latency(shown, 1.0, 4.17));
-        let c = HudConfig { corner: 1, fps: true, latency: true, display_latency: false, ping: false, frame_time: false, gpu: false, cpu: false, ram: false, clock: false, in_capture: false, frame_gen: 1, game_frame_gen: vec![("cyberpunk2077.exe".into(), 3), ("cs2.exe".into(), 0)] };
-        assert_eq!(c.frame_gen_for(Some("Cyberpunk2077.exe")), 3);
-        assert_eq!(c.frame_gen_for(Some("cs2.exe")), 1); // 0 = the general setting
-        assert_eq!(c.frame_gen_for(None), 1);
+        assert_eq!(smart_latency_fg(shown, 1.0, 1.0, 4.17), smart_latency(shown, 1.0, 4.17));
     }
 
     #[test]

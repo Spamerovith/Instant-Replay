@@ -14,6 +14,8 @@ use crate::util::wide;
 
 pub const CLASS_NAME: PCWSTR = w!("InstantReplayTrayWindow");
 pub const WM_APP_SHOW: u32 = WM_APP + 11;
+/// `--quit`: another launch asks the running copy to exit (works across the admin boundary).
+pub const WM_APP_QUIT: u32 = WM_APP + 13;
 const WM_APP_TRAY: u32 = WM_APP + 10;
 const WM_APP_ICON: u32 = WM_APP + 12;
 
@@ -192,6 +194,12 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             }
             LRESULT(0)
         }
+        WM_APP_QUIT => {
+            if let Some(ctx) = CTX.get() {
+                (ctx.on_cmd)(TrayCmd::Exit);
+            }
+            LRESULT(0)
+        }
         WM_APP_ICON => {
             ICON_STATE = wp.0;
             add_icon(hwnd, true);
@@ -222,6 +230,7 @@ unsafe fn tray_thread() {
     // Allow the TaskbarCreated broadcast through UIPI.
     let _ = ChangeWindowMessageFilterEx(hwnd, TASKBAR_CREATED, MSGFLT_ALLOW, None);
     let _ = ChangeWindowMessageFilterEx(hwnd, WM_APP_SHOW, MSGFLT_ALLOW, None);
+    let _ = ChangeWindowMessageFilterEx(hwnd, WM_APP_QUIT, MSGFLT_ALLOW, None);
     HWND_TRAY.store(hwnd.0 as isize, std::sync::atomic::Ordering::SeqCst);
     add_icon(hwnd, false);
     let mut msg = MSG::default();
@@ -239,6 +248,16 @@ pub fn remove() {
 }
 
 /// Asks an already running instance to show its window. Returns true if one was found.
+/// Asks a running copy to exit. False when none runs.
+pub fn signal_quit() -> bool {
+    unsafe {
+        match FindWindowW(CLASS_NAME, None) {
+            Ok(h) if !h.is_invalid() => PostMessageW(h, WM_APP_QUIT, WPARAM(0), LPARAM(0)).is_ok(),
+            _ => false,
+        }
+    }
+}
+
 pub fn signal_existing_instance() -> bool {
     unsafe {
         match FindWindowW(CLASS_NAME, None) {

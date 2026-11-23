@@ -1492,6 +1492,17 @@ impl App {
             g.row(tr!("Запускать вместе с Windows", "Start with Windows", "Запускати разом з Windows"), None, |ui| {
                 w::switch(ui, &mut self.cfg.autostart, tr!("Запускать вместе с Windows", "Start with Windows", "Запускати разом з Windows"));
             });
+            g.row(
+                tr!("Запускать от имени администратора", "Run as administrator", "Запускати від імені адміністратора"),
+                Some(tr!(
+                    "Нужно для точного FPS в счётчике. Применится при следующем запуске",
+                    "Needed for the exact FPS in the counter. Applies at the next start",
+                    "Потрібно для точного FPS у лічильнику. Застосується під час наступного запуску"
+                )),
+                |ui| {
+                    w::switch(ui, &mut self.cfg.run_as_admin, tr!("Запускать от имени администратора", "Run as administrator", "Запускати від імені адміністратора"));
+                },
+            );
             g.row(tr!("Открывать свёрнутым в трей", "Start minimized to tray", "Відкривати згорнутим у трей"), None, |ui| {
                 w::switch(ui, &mut self.cfg.start_minimized, tr!("Открывать свёрнутым в трей", "Start minimized to tray", "Відкривати згорнутим у трей"));
             });
@@ -1560,19 +1571,25 @@ impl App {
                     w::switch(ui, &mut self.cfg.hud_ping, "PING");
                 },
             );
-            g.row(
-                tr!("Генерация кадров (FG)", "Frame generation (FG)", "Генерація кадрів (FG)"),
-                Some(tr!(
-                    "Если в игре включена DLSS / FSR FG: FPS с ней основным цветом, настоящий серым. У игры с профилем - своя настройка",
-                    "When DLSS / FSR FG is on in the game: FPS with it in the main colour, the real one grey. A game with a profile has its own",
-                    "Якщо в грі увімкнено DLSS / FSR FG: FPS з нею основним кольором, справжній сірим. Гра з профілем має своє налаштування"
-                )),
+            let elevated = crate::elevation::is_elevated();
+            g.row_rich(
+                tr!("Точный FPS", "Exact FPS", "Точний FPS"),
+                Some(if elevated {
+                    tr!(
+                        "Каждый кадр игры, и выше частоты монитора, по системной трассировке Windows (как в AfterCore). С генерацией кадров настоящий FPS серым",
+                        "Every frame of the game, also above the screen's refresh rate, from the Windows event trace (as in AfterCore). With frame generation the real FPS in grey",
+                        "Кожен кадр гри, і вище частоти монітора, за системним трасуванням Windows (як в AfterCore). З генерацією кадрів справжній FPS сірим"
+                    )
+                } else {
+                    tr!(
+                        "Нужен запуск от имени администратора («Запуск» ниже). Сейчас FPS не выше частоты монитора",
+                        "Needs running as administrator (Startup below). For now FPS stops at the screen's refresh rate",
+                        "Потрібен запуск від імені адміністратора («Запуск» нижче). Зараз FPS не вище частоти монітора"
+                    )
+                }),
+                if elevated { None } else { Some(color::WARNING) },
                 |ui| {
-                    let opts = [(tr!("Нет", "Off", "Ні"), true), ("2×", true), ("3×", true), ("4×", true)];
-                    let mut sel = (self.cfg.hud_frame_gen.clamp(1, 4) - 1) as usize;
-                    if w::segmented(ui, "hud-fg", &opts, &mut sel) {
-                        self.cfg.hud_frame_gen = sel as u8 + 1;
-                    }
+                    w::value_text(ui, if elevated { tr!("Включён", "On", "Увімкнено") } else { tr!("Недоступен", "Unavailable", "Недоступний") });
                 },
             );
             g.row(tr!("Время кадра (FT)", "Frame time (FT)", "Час кадру (FT)"), Some(tr!("Миллисекунды на кадр", "Milliseconds per frame", "Мілісекунди на кадр")), |ui| {
@@ -2182,17 +2199,6 @@ impl App {
                         p.quality = crate::config::BitrateQuality::ALL[sel];
                     }
                 });
-                g.row(
-                    tr!("Генерация кадров (FG)", "Frame generation (FG)", "Генерація кадрів (FG)"),
-                    Some(tr!("Для счётчика FPS: настоящий FPS показывается серым", "For the FPS counter: the real FPS is shown grey", "Для лічильника FPS: справжній FPS показується сірим")),
-                    |ui| {
-                        let opts = [(tr!("Как в счётчике", "As in the counter", "Як у лічильнику"), true), (tr!("Нет", "Off", "Ні"), true), ("2×", true), ("3×", true), ("4×", true)];
-                        let mut sel = p.frame_gen.min(4) as usize;
-                        if w::segmented(ui, &format!("game-fg-{i}"), &opts, &mut sel) {
-                            p.frame_gen = sel as u8;
-                        }
-                    },
-                );
                 g.row(tr!("Длительность буфера", "Buffer length", "Тривалість буфера"), None, |ui| {
                     let idx = REPLAY_STEPS.iter().position(|&s| s >= p.replay_seconds).unwrap_or(REPLAY_STEPS.len() - 1);
                     let mut fidx = idx as f32;
