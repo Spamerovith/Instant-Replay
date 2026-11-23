@@ -326,6 +326,9 @@ pub struct App {
     /// Every clip of the save folder for the overlay gallery page.
     gallery_clips: Vec<crate::engine::ClipInfo>,
     gallery_at: Option<Instant>,
+    /// Gallery filter: 0 all, 1 replays, 2 recordings; and the chosen game.
+    gallery_kind: u8,
+    gallery_game: Option<String>,
     /// Preview pictures of clips: asked for once, `None` until ready (or when none could be made).
     thumbs: crate::thumbs::Thumbs,
     thumb_tex: std::collections::HashMap<std::path::PathBuf, Option<egui::TextureHandle>>,
@@ -377,6 +380,8 @@ impl App {
             delete_error: None,
             gallery_clips: Vec::new(),
             gallery_at: None,
+            gallery_kind: 0,
+            gallery_game: None,
             thumbs: crate::thumbs::Thumbs::start(cc.egui_ctx.clone()),
             thumb_tex: std::collections::HashMap::new(),
             update: None,
@@ -1986,7 +1991,10 @@ impl App {
         let mut folder = false;
         let mut picked: Option<std::path::PathBuf> = None;
         let mut delete_req: Option<std::path::PathBuf> = None;
-        let clips = self.gallery_clips.clone();
+        let all_clips = self.gallery_clips.clone();
+        let games = crate::engine::clip_games(&all_clips);
+        let mut kind = self.gallery_kind;
+        let mut game = self.gallery_game.clone().filter(|g| games.iter().any(|(n, _)| n == g));
         let frame = egui::Frame::none().fill(color::SURFACE).inner_margin(egui::Margin::symmetric(space::S20, space::S16));
         egui::CentralPanel::default().frame(frame).show(ctx, |ui| {
             ui.spacing_mut().item_spacing = vec2(space::S8, 0.0);
@@ -2006,8 +2014,35 @@ impl App {
                 });
             });
             overlay_divider(ui);
+            ui.add_space(space::S4);
+            let kinds = [tr!("Все", "All", "Усі"), tr!("Повторы", "Replays", "Повтори"), tr!("Записи", "Recordings", "Записи")];
+            let kind_opts: Vec<(&str, bool)> = kinds.iter().map(|k| (*k, true)).collect();
+            let mut sel = kind as usize;
+            if w::segmented(ui, "gal-kind", &kind_opts, &mut sel) {
+                kind = sel as u8;
+            }
+            if !games.is_empty() {
+                ui.add_space(space::S8);
+                egui::ScrollArea::horizontal().id_salt("gal-games").show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        let all_kind = if game.is_none() { Kind::Primary } else { Kind::Ghost };
+                        if w::pill_button(ui, tr!("Все игры", "All games", "Усі ігри"), all_kind, size::BUTTON_SM, true).clicked() {
+                            game = None;
+                        }
+                        for (name, n) in &games {
+                            let k = if game.as_deref() == Some(name.as_str()) { Kind::Primary } else { Kind::Ghost };
+                            if w::pill_button(ui, &format!("{} · {}", game_label(name), n), k, size::BUTTON_SM, true).clicked() {
+                                game = Some(name.clone());
+                            }
+                        }
+                    });
+                });
+            }
+            ui.add_space(space::S12);
+            let clips = crate::engine::filter_clips(&all_clips, kind, game.as_deref());
             if clips.is_empty() {
-                ui.label(RichText::new(tr!("Пока пусто", "Nothing yet", "Поки порожньо")).font(theme::subhead()).color(color::TEXT_SECONDARY));
+                let empty = if all_clips.is_empty() { tr!("Пока пусто", "Nothing yet", "Поки порожньо") } else { tr!("Ничего не найдено", "Nothing found", "Нічого не знайдено") };
+                ui.label(RichText::new(empty).font(theme::subhead()).color(color::TEXT_SECONDARY));
                 return;
             }
             let gap = space::S8;
@@ -2036,6 +2071,8 @@ impl App {
                 }
             });
         });
+        self.gallery_kind = kind;
+        self.gallery_game = game;
         if delete_req.is_some() {
             self.delete_pending = delete_req;
             self.delete_error = None;
@@ -2054,5 +2091,14 @@ impl App {
         } else if let Some(p) = picked {
             self.open_from_overlay(ctx, &p);
         }
+    }
+}
+
+/// How a game (capture source) is named in the gallery filter.
+fn game_label(name: &str) -> String {
+    if name == "Desktop" {
+        tr!("Рабочий стол", "Desktop", "Робочий стіл").to_string()
+    } else {
+        name.to_string()
     }
 }

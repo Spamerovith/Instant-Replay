@@ -1114,3 +1114,83 @@ mod scan_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
+
+/// The game (capture source) a clip came from: the part of its name before " - Replay " or
+/// " - Recording ", e.g. `Bionic` for `Bionic - Replay 2026-11-23 12-41-39.mp4`.
+pub fn clip_game(path: &Path) -> String {
+    let name = path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+    for marker in [" - Replay ", " - Recording "] {
+        if let Some(i) = name.find(marker) {
+            return name[..i].to_string();
+        }
+    }
+    String::new()
+}
+
+/// Gallery filter: `kind` 0 = all, 1 = replays, 2 = recordings; `game` limits to one source.
+pub fn filter_clips(clips: &[ClipInfo], kind: u8, game: Option<&str>) -> Vec<ClipInfo> {
+    clips
+        .iter()
+        .filter(|c| match kind {
+            1 => c.is_replay,
+            2 => !c.is_replay,
+            _ => true,
+        })
+        .filter(|c| game.map_or(true, |g| clip_game(&c.path) == g))
+        .cloned()
+        .collect()
+}
+
+/// The games present among the clips, those with the most clips first.
+pub fn clip_games(clips: &[ClipInfo]) -> Vec<(String, usize)> {
+    let mut counts: Vec<(String, usize)> = Vec::new();
+    for c in clips {
+        let g = clip_game(&c.path);
+        if g.is_empty() {
+            continue;
+        }
+        match counts.iter_mut().find(|(n, _)| *n == g) {
+            Some(e) => e.1 += 1,
+            None => counts.push((g, 1)),
+        }
+    }
+    counts.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    counts
+}
+
+#[cfg(test)]
+mod filter_tests {
+    use super::*;
+
+    fn clip(name: &str, is_replay: bool) -> ClipInfo {
+        ClipInfo { path: PathBuf::from(format!("D:/clips/{name}.mp4")), secs: 5.0, bytes: 1, is_replay }
+    }
+
+    #[test]
+    fn game_is_the_name_before_the_kind_marker() {
+        assert_eq!(clip_game(Path::new("Bionic - Replay 2026-11-23 12-41-39.mp4")), "Bionic");
+        assert_eq!(clip_game(Path::new("Desktop - Recording 2026-11-23 12-41-39 (2).mp4")), "Desktop");
+        assert_eq!(clip_game(Path::new("My - Game - Replay 2026-11-23.mp4")), "My - Game");
+        assert_eq!(clip_game(Path::new("holiday.mp4")), "");
+    }
+
+    #[test]
+    fn filter_by_kind_and_game() {
+        let clips = vec![
+            clip("Bionic - Replay 1", true),
+            clip("Bionic - Recording 2", false),
+            clip("cs2 - Replay 3", true),
+            clip("Desktop - Replay 4", true),
+            clip("random", true),
+        ];
+        assert_eq!(filter_clips(&clips, 0, None).len(), 5);
+        assert_eq!(filter_clips(&clips, 1, None).len(), 4);
+        assert_eq!(filter_clips(&clips, 2, None).len(), 1);
+        assert_eq!(filter_clips(&clips, 0, Some("Bionic")).len(), 2);
+        assert_eq!(filter_clips(&clips, 1, Some("Bionic")).len(), 1);
+        assert_eq!(filter_clips(&clips, 2, Some("cs2")).len(), 0);
+        let games = clip_games(&clips);
+        assert_eq!(games[0], ("Bionic".to_string(), 2));
+        assert_eq!(games.len(), 3); // "random" has no source in its name
+    }
+}
