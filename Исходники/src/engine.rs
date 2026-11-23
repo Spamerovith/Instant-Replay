@@ -1024,9 +1024,7 @@ fn sink_thread(
                 match (&mut replay, &video_info) {
                     (Some(b), Some(vi)) => match b.snapshot_last(last) {
                         Some(snap) => {
-                            if last.is_none() {
-                                b.clear(); // a full save restarts the counter; a quick save keeps the buffer
-                            }
+                            b.clear(); // any save (full or last N seconds) restarts the counter from zero
                             let mut packets = vec![snap.video];
                             packets.extend(snap.audio);
                             let tr = tracks(vi);
