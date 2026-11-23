@@ -7,6 +7,7 @@ mod audio;
 mod autostart;
 mod capture;
 mod config;
+mod crashlog;
 mod encoder;
 mod engine;
 mod elevation;
@@ -50,6 +51,7 @@ static EGUI_CTX: OnceLock<egui::Context> = OnceLock::new();
 
 fn main() {
     util::init_logging();
+    crashlog::install();
     log::info!("Instant Replay {} starting", env!("CARGO_PKG_VERSION"));
     std::panic::set_hook(Box::new(|info| {
         log::error!("panic: {info}");

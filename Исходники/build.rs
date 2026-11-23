@@ -77,6 +77,11 @@ fn ico() -> Vec<u8> {
 }
 
 fn main() {
+    // Linker map next to the exe: turns crash-log offsets (src/crashlog.rs) into function names.
+    if let Ok(out) = std::env::var("OUT_DIR") {
+        let map = PathBuf::from(out).join("../../../instant-replay.map");
+        println!("cargo:rustc-link-arg-bins=/MAP:{}", map.display());
+    }
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=Cargo.toml");
     let out = PathBuf::from(std::env::var("OUT_DIR").unwrap());

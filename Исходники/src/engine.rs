@@ -74,6 +74,8 @@ pub struct Status {
     pub pending_restart: bool,
     /// Name of the active game profile.
     pub active_profile: Option<String>,
+    /// Buffer length in force (a game profile's own while it is active), seconds.
+    pub replay_seconds: u32,
     /// Mirror of `Config::replay_enabled` as the engine sees it (hotkey/tray can flip it).
     pub replay_enabled: bool,
 }
@@ -299,6 +301,7 @@ impl Engine {
             let mut v = p.volumes.lock();
             *v = (if c.system_audio { c.system_volume } else { 0.0 }, if c.mic_enabled { c.mic_volume } else { 0.0 });
         }
+        self.status.write().replay_seconds = c.replay_seconds;
         self.config = c;
         self.status.write().active_profile = self.active_exe.as_ref().and_then(|e| {
             self.base.profiles.iter().find(|p| p.exe.eq_ignore_ascii_case(e)).map(|p| if p.name.is_empty() { p.exe.clone() } else { p.name.clone() })
@@ -335,7 +338,7 @@ impl Engine {
         // window disappears), even when another profiled game is started.
         let active_running = self.active_exe.as_ref().map_or(false, |a| exes.iter().any(|e| e.eq_ignore_ascii_case(a)));
         self.active_lost = if active_running || self.active_exe.is_none() { None } else { self.active_lost.or(Some(now)) };
-        let in_grace = self.active_lost.map_or(false, |t| t.elapsed() < Duration::from_secs(10));
+        let in_grace = self.active_lost.map_or(false, |t| t.elapsed() < Duration::from_secs(4));
         let want = if active_running || in_grace {
             self.active_exe.clone()
         } else {
@@ -346,6 +349,7 @@ impl Engine {
         }
         self.active_exe = want;
         self.use_effective_config();
+        log::info!("profile: {:?}, buffer {} s", self.active_exe, self.config.replay_seconds);
         if let Some(name) = self.status.read().active_profile.clone() {
             (self.notify)(Notice {
                 kind: NoticeKind::ReplayOn,

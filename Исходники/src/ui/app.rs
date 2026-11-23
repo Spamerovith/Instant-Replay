@@ -878,7 +878,8 @@ impl App {
                 });
             });
             ui.add_space(space::S12);
-            let total = self.cfg.replay_seconds as f64;
+            // The game profile's length while it is active, not the general one.
+            let total = if st.replay_seconds > 0 { st.replay_seconds } else { self.cfg.replay_seconds } as f64;
             let buffered = if st.replay_active { st.buffered_secs.min(total) } else { 0.0 };
             ui.label(
                 RichText::new(util::format_duration(buffered))
