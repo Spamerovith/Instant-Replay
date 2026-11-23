@@ -1,4 +1,4 @@
-//! Taken from AfterCore (ac-telemetry/src/etw.rs), unchanged apart from the module path.
+//! Taken from AfterCore (ac-telemetry/src/etw.rs); changed: the module path and the session name.
 //! Minimal real-time ETW consumer for present events.
 //!
 //! Providers (IDs verified against the manifests registered on Windows 11):
@@ -19,7 +19,8 @@ use windows_sys::Win32::System::Diagnostics::Etw::*;
 
 use super::tracker::{FrameTracker, Source};
 
-pub const SESSION_NAME: &str = "AfterCore-FrameTrace";
+// Own session name: AfterCore may run at the same time with its "AfterCore-FrameTrace".
+pub const SESSION_NAME: &str = "InstantReplay-FrameTrace";
 
 const DXGI: GUID = GUID::from_u128(0xCA11C036_0102_4A2D_A6AD_F03CFED5D3C9);
 const D3D9: GUID = GUID::from_u128(0x783ACA0A_790E_4D7F_8451_AA850511C6B9);
