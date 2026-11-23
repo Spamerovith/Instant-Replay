@@ -1560,6 +1560,21 @@ impl App {
                     w::switch(ui, &mut self.cfg.hud_ping, "PING");
                 },
             );
+            g.row(
+                tr!("Генерация кадров (FG)", "Frame generation (FG)", "Генерація кадрів (FG)"),
+                Some(tr!(
+                    "Если в игре включена DLSS / FSR FG: FPS с ней основным цветом, настоящий серым. У игры с профилем - своя настройка",
+                    "When DLSS / FSR FG is on in the game: FPS with it in the main colour, the real one grey. A game with a profile has its own",
+                    "Якщо в грі увімкнено DLSS / FSR FG: FPS з нею основним кольором, справжній сірим. Гра з профілем має своє налаштування"
+                )),
+                |ui| {
+                    let opts = [(tr!("Нет", "Off", "Ні"), true), ("2×", true), ("3×", true), ("4×", true)];
+                    let mut sel = (self.cfg.hud_frame_gen.clamp(1, 4) - 1) as usize;
+                    if w::segmented(ui, "hud-fg", &opts, &mut sel) {
+                        self.cfg.hud_frame_gen = sel as u8 + 1;
+                    }
+                },
+            );
             g.row(tr!("Время кадра (FT)", "Frame time (FT)", "Час кадру (FT)"), Some(tr!("Миллисекунды на кадр", "Milliseconds per frame", "Мілісекунди на кадр")), |ui| {
                 w::switch(ui, &mut self.cfg.hud_frame_time, tr!("Время кадра", "Frame time", "Час кадру"));
             });
@@ -2167,6 +2182,17 @@ impl App {
                         p.quality = crate::config::BitrateQuality::ALL[sel];
                     }
                 });
+                g.row(
+                    tr!("Генерация кадров (FG)", "Frame generation (FG)", "Генерація кадрів (FG)"),
+                    Some(tr!("Для счётчика FPS: настоящий FPS показывается серым", "For the FPS counter: the real FPS is shown grey", "Для лічильника FPS: справжній FPS показується сірим")),
+                    |ui| {
+                        let opts = [(tr!("Как в счётчике", "As in the counter", "Як у лічильнику"), true), (tr!("Нет", "Off", "Ні"), true), ("2×", true), ("3×", true), ("4×", true)];
+                        let mut sel = p.frame_gen.min(4) as usize;
+                        if w::segmented(ui, &format!("game-fg-{i}"), &opts, &mut sel) {
+                            p.frame_gen = sel as u8;
+                        }
+                    },
+                );
                 g.row(tr!("Длительность буфера", "Buffer length", "Тривалість буфера"), None, |ui| {
                     let idx = REPLAY_STEPS.iter().position(|&s| s >= p.replay_seconds).unwrap_or(REPLAY_STEPS.len() - 1);
                     let mut fidx = idx as f32;

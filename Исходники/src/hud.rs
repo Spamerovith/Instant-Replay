@@ -53,6 +53,17 @@ pub struct HudConfig {
     pub ram: bool,
     pub clock: bool,
     pub in_capture: bool,
+    /// Frame generation: the general factor and the games' own (lower-case exe, factor).
+    pub frame_gen: u8,
+    pub game_frame_gen: Vec<(String, u8)>,
+}
+
+impl HudConfig {
+    /// Generated frames per real one for the game `exe` (1 = no frame generation).
+    pub fn frame_gen_for(&self, exe: Option<&str>) -> u8 {
+        let own = exe.and_then(|e| self.game_frame_gen.iter().find(|(x, _)| x.eq_ignore_ascii_case(e)).map(|(_, f)| *f)).filter(|f| *f > 0);
+        own.unwrap_or(self.frame_gen).clamp(1, 4)
+    }
 }
 
 impl HudConfig {
@@ -69,6 +80,8 @@ impl HudConfig {
             ram: c.hud_ram,
             clock: c.hud_clock,
             in_capture: c.hud_in_capture,
+            frame_gen: c.hud_frame_gen,
+            game_frame_gen: c.profiles.iter().map(|p| (p.exe.to_lowercase(), p.frame_gen)).collect(),
         }
     }
 }
@@ -187,6 +200,16 @@ pub fn smart_latency(frame_ms: f64, wait_ms: f64, refresh_ms: f64) -> f64 {
     2.0 * frame_ms + wait_ms + refresh_ms / 2.0
 }
 
+/// Smart latency with frame generation: the game's real frame is `fg` shown frames long, and the
+/// generator holds one real frame back to build the in-between pictures.
+pub fn smart_latency_fg(shown_frame_ms: f64, fg: u8, wait_ms: f64, refresh_ms: f64) -> f64 {
+    if fg <= 1 {
+        return smart_latency(shown_frame_ms, wait_ms, refresh_ms);
+    }
+    let real = shown_frame_ms * fg as f64;
+    smart_latency(real, wait_ms, refresh_ms) + real
+}
+
 /// Counts the pictures a window (or monitor) hands to Windows Graphics Capture.
 struct FpsProbe {
     target: isize,
@@ -253,6 +276,8 @@ struct Gauges {
     last: Instant,
     /// Process of the measured game (for the ping), and the ping thread's last result.
     game_pid: Arc<AtomicU32>,
+    /// Executable of the measured game (for its frame generation setting).
+    game_exe: Option<String>,
     ping: Arc<Mutex<Option<f32>>>,
     ping_on: Arc<AtomicBool>,
 }
@@ -296,7 +321,7 @@ impl Gauges {
                 })
                 .ok();
         }
-        Gauges { device, probe: None, probe_at: Instant::now(), last_count: 0, fps: None, pdh: q, gpu_counter: c, cpu_prev: None, last: Instant::now(), game_pid, ping, ping_on }
+        Gauges { device, probe: None, probe_at: Instant::now(), last_count: 0, fps: None, pdh: q, gpu_counter: c, cpu_prev: None, last: Instant::now(), game_pid, game_exe: None, ping, ping_on }
     }
 
     /// Follows the foreground window: a game window is measured itself, the desktop by its monitor.
@@ -314,6 +339,9 @@ impl Gauges {
             }
             let shell = crate::capture::sources::foreground_program().is_none();
             self.game_pid.store(if shell { 0 } else { pid }, Ordering::Relaxed);
+            if self.probe.as_ref().map_or(true, |p| p.target != (if shell { MonitorFromWindow(fg, MONITOR_DEFAULTTOPRIMARY).0 as isize } else { fg.0 as isize })) {
+                self.game_exe = if shell { None } else { crate::capture::sources::foreground_exe() };
+            }
             let monitor = if shell { Some(MonitorFromWindow(fg, MONITOR_DEFAULTTOPRIMARY)) } else { None };
             let target = monitor.map(|m| m.0 as isize).unwrap_or(fg.0 as isize);
             if self.probe.as_ref().map_or(false, |p| p.target == target) {
@@ -330,7 +358,7 @@ impl Gauges {
         }
     }
 
-    fn sample(&mut self, want_ping: bool) -> Sample {
+    fn sample(&mut self, want_ping: bool, cfg: &HudConfig) -> Sample {
         self.ping_on.store(want_ping, Ordering::Relaxed);
         let dt = self.last.elapsed().as_secs_f32().max(0.05);
         self.last = Instant::now();
@@ -403,13 +431,16 @@ impl Gauges {
         if self.fps.map_or(true, |f| f < 1.0) {
             frame_ms = None;
         }
+        // Frame generation: the screen gets `fg` pictures per frame the game really renders.
+        let fg = cfg.frame_gen_for(self.game_exe.as_deref());
         let latency = match (frame_ms, wait_ms) {
-            (Some(f), Some(w)) => Some(smart_latency(f, w, refresh_ms) as f32),
+            (Some(f), Some(w)) => Some(smart_latency_fg(f, fg, w, refresh_ms) as f32),
             _ => None,
         };
+        let real_fps = if fg > 1 { self.fps.map(|f| f / fg as f32) } else { None };
         let display = wait_ms.filter(|_| frame_ms.is_some()).map(|w| (w + refresh_ms / 2.0) as f32);
         let ping = *self.ping.lock();
-        Sample { fps: self.fps, frame_ms: frame_ms.map(|f| f as f32), latency, display, ping, gpu, cpu, ram }
+        Sample { fps: self.fps, real_fps, frame_ms: frame_ms.map(|f| f as f32), latency, display, ping, gpu, cpu, ram }
     }
 
     fn stop_probe(&mut self) {
@@ -430,6 +461,8 @@ impl Drop for Gauges {
 
 struct Sample {
     fps: Option<f32>,
+    /// FPS the game really renders when frame generation is on (shown grey next to the FPS).
+    real_fps: Option<f32>,
     frame_ms: Option<f32>,
     latency: Option<f32>,
     display: Option<f32>,
@@ -440,11 +473,15 @@ struct Sample {
 }
 
 /// The row's parts: label and value.
-fn segments(s: &Sample, c: &HudConfig) -> Vec<(&'static str, String)> {
-    let mut out = Vec::new();
+/// The row's parts: label, value and an optional grey value after it.
+fn segments(s: &Sample, c: &HudConfig) -> Vec<(&'static str, String, Option<String>)> {
+    let mut out: Vec<(&'static str, String)> = Vec::new();
     let dash = "-".to_string();
+    let mut fps_extra = None;
     if c.fps {
         out.push(("FPS", s.fps.map(|f| format!("{:.0}", f)).unwrap_or(dash.clone())));
+        // With frame generation: the shown FPS in the main colour, the real one grey after it.
+        fps_extra = s.real_fps.map(|f| format!("{:.0}", f));
     }
     if c.latency {
         out.push(("LAT", s.latency.map(|v| format!("{:.1} ms", v)).unwrap_or(dash.clone())));
@@ -470,7 +507,7 @@ fn segments(s: &Sample, c: &HudConfig) -> Vec<(&'static str, String)> {
     if c.clock {
         out.push(("", crate::util::clock_hhmm()));
     }
-    out
+    out.into_iter().map(|(l, v)| (l, v, if l == "FPS" { fps_extra.clone() } else { None })).collect()
 }
 
 // ------------------------------------------------------------------ window
@@ -551,7 +588,7 @@ unsafe fn tick() {
     if !(cfg.fps || cfg.frame_time || cfg.latency || cfg.display_latency) {
         g.stop_probe();
     }
-    let sample = g.sample(cfg.ping);
+    let sample = g.sample(cfg.ping, &cfg);
     let segs = segments(&sample, &cfg);
     if segs.is_empty() {
         if st.shown {
@@ -605,7 +642,7 @@ unsafe fn text_width(dw: &IDWriteFactory, text: &[u16], fmt: &IDWriteTextFormat)
 }
 
 /// Draws the row into the window bitmap; returns its size in pixels.
-unsafe fn render(st: &mut State, segs: &[(&'static str, String)], s: f32) -> windows::core::Result<(i32, i32)> {
+unsafe fn render(st: &mut State, segs: &[(&'static str, String, Option<String>)], s: f32) -> windows::core::Result<(i32, i32)> {
     let fam = w!("Segoe UI Variable Text");
     let label_fmt = st.dw.CreateTextFormat(fam, None, DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, 11.0 * s, w!("en-us"))?;
     let value_fmt = st.dw.CreateTextFormat(fam, None, DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, 14.0 * s, w!("en-us"))?;
@@ -620,17 +657,19 @@ unsafe fn render(st: &mut State, segs: &[(&'static str, String)], s: f32) -> win
     let digit = text_width(&st.dw, &"0".encode_utf16().collect::<Vec<_>>(), &value_fmt);
     let mut parts = Vec::new();
     let mut total = pad * 2.0;
-    for (i, (label, value)) in segs.iter().enumerate() {
+    for (i, (label, value, extra)) in segs.iter().enumerate() {
         let l: Vec<u16> = label.encode_utf16().collect();
         let v: Vec<u16> = value.encode_utf16().collect();
         let lw = if label.is_empty() { 0.0 } else { text_width(&st.dw, &l, &label_fmt) };
         let vw = text_width(&st.dw, &v, &value_fmt).max(digit * value.chars().count().max(3) as f32 * 0.98);
-        let w = lw + if label.is_empty() { 0.0 } else { gap } + vw;
+        let e: Vec<u16> = extra.as_deref().unwrap_or("").encode_utf16().collect();
+        let ew = if e.is_empty() { 0.0 } else { text_width(&st.dw, &e, &value_fmt).max(digit * e.len().max(2) as f32 * 0.98) };
+        let w = lw + if label.is_empty() { 0.0 } else { gap } + vw + if e.is_empty() { 0.0 } else { gap + ew };
         if i > 0 {
             total += sep;
         }
         total += w;
-        parts.push((l, v, lw, vw));
+        parts.push((l, v, lw, vw, e, ew));
     }
     let (w, h) = (total.ceil() as i32, (30.0 * s).ceil() as i32);
     if st.bmp_size.cx != w || st.bmp_size.cy != h || st.bitmap.is_invalid() {
@@ -670,7 +709,7 @@ unsafe fn render(st: &mut State, segs: &[(&'static str, String)], s: f32) -> win
     let value_brush = rt.CreateSolidColorBrush(&color(0xf5f5f7, 1.0), None)?;
     let div = rt.CreateSolidColorBrush(&color(0xffffff, 0.16), None)?;
     let mut x = pad;
-    for (i, (l, v, lw, vw)) in parts.iter().enumerate() {
+    for (i, (l, v, lw, vw, e, ew)) in parts.iter().enumerate() {
         if i > 0 {
             let cx = x + sep / 2.0;
             rt.DrawLine(D2D_POINT_2F { x: cx, y: 9.0 * s }, D2D_POINT_2F { x: cx, y: h as f32 - 9.0 * s }, &div, 1.0 * s, None);
@@ -684,6 +723,12 @@ unsafe fn render(st: &mut State, segs: &[(&'static str, String)], s: f32) -> win
         let r = D2D_RECT_F { left: x, top: 0.0, right: x + vw + 1.0, bottom: h as f32 };
         rt.DrawText(v, &value_fmt, &r, &value_brush, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
         x += vw;
+        if !e.is_empty() {
+            x += gap;
+            let r = D2D_RECT_F { left: x, top: 0.0, right: x + ew + 1.0, bottom: h as f32 };
+            rt.DrawText(e, &value_fmt, &r, &label_brush, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+            x += ew;
+        }
     }
     rt.EndDraw(None, None)?;
     Ok((w, h))
@@ -749,6 +794,20 @@ mod tests {
         // 120 fps (8.33 ms), 3 ms to the vblank, 144 Hz screen (6.94 ms)
         let l = smart_latency(8.33, 3.0, 6.94);
         assert!((l - (16.66 + 3.0 + 3.47)).abs() < 0.01);
+    }
+
+    #[test]
+    fn frame_generation_counts_real_frames() {
+        // 240 shown fps with 2x frame generation = 120 real fps (8.33 ms real frames).
+        let shown = 1000.0 / 240.0;
+        let l = smart_latency_fg(shown, 2, 1.0, 4.17);
+        let real = shown * 2.0;
+        assert!((l - (2.0 * real + 1.0 + 2.085 + real)).abs() < 0.01);
+        assert_eq!(smart_latency_fg(shown, 1, 1.0, 4.17), smart_latency(shown, 1.0, 4.17));
+        let c = HudConfig { corner: 1, fps: true, latency: true, display_latency: false, ping: false, frame_time: false, gpu: false, cpu: false, ram: false, clock: false, in_capture: false, frame_gen: 1, game_frame_gen: vec![("cyberpunk2077.exe".into(), 3), ("cs2.exe".into(), 0)] };
+        assert_eq!(c.frame_gen_for(Some("Cyberpunk2077.exe")), 3);
+        assert_eq!(c.frame_gen_for(Some("cs2.exe")), 1); // 0 = the general setting
+        assert_eq!(c.frame_gen_for(None), 1);
     }
 
     #[test]

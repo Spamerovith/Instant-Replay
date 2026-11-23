@@ -292,6 +292,49 @@ fn main() {
 }
 
 /// Headless end-to-end check: buffer → save replay → record 6 s → stop. Results go to the log.
+#[cfg(test)]
+mod anticheat_tests {
+    /// Anti-cheat guard: our code never opens other processes, hooks input, reads or writes their
+    /// memory, injects code or fakes input. Fails if one of these calls shows up in `src`.
+    #[test]
+    fn no_calls_that_anti_cheats_flag() {
+        let forbidden = [
+            ["Open", "Process"].concat(),
+            ["Read", "ProcessMemory"].concat(),
+            ["Write", "ProcessMemory"].concat(),
+            ["Virtual", "AllocEx"].concat(),
+            ["Create", "RemoteThread"].concat(),
+            ["SetWindows", "HookEx"].concat(),
+            ["SetWin", "EventHook"].concat(),
+            ["Send", "Input"].concat(),
+            ["keybd", "_event"].concat(),
+            ["mouse", "_event"].concat(),
+            ["TH32CS_", "SNAPMODULE"].concat(),
+            ["EnumProcess", "Modules"].concat(),
+            ["Adjust", "TokenPrivileges"].concat(),
+            ["Debug", "ActiveProcess"].concat(),
+        ];
+        let mut stack = vec![std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src")];
+        let mut found = Vec::new();
+        while let Some(dir) = stack.pop() {
+            for e in std::fs::read_dir(&dir).unwrap().flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    stack.push(p);
+                } else if p.extension().map_or(false, |x| x == "rs") {
+                    let text = std::fs::read_to_string(&p).unwrap();
+                    for f in &forbidden {
+                        if text.contains(f.as_str()) {
+                            found.push(format!("{}: {f}", p.display()));
+                        }
+                    }
+                }
+            }
+        }
+        assert!(found.is_empty(), "calls anti-cheats flag: {found:?}");
+    }
+}
+
 fn selftest(dir: String, codec: Option<String>) {
     log::info!("TOOLS dir={:?} justview={:?} ffprobe={:?}", tools::dir(), util::find_justview(), player::ffmpeg::ffprobe());
     let mut cfg = Config::default();
