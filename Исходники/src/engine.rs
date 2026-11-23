@@ -72,6 +72,8 @@ pub struct Status {
     pub encoders: Vec<EncoderOption>,
     pub recent: Vec<ClipInfo>,
     pub pending_restart: bool,
+    /// Name of the active game profile.
+    pub active_profile: Option<String>,
     /// Mirror of `Config::replay_enabled` as the engine sees it (hotkey/tray can flip it).
     pub replay_enabled: bool,
 }
@@ -113,7 +115,13 @@ pub fn start(config: Config, notifier: Notifier) -> EngineHandle {
 // ------------------------------------------------------------------ engine
 
 struct Engine {
+    /// Settings in force: the general ones, or those of the active game profile.
     config: Config,
+    /// The general settings as the user set them (the only ones ever saved).
+    base: Config,
+    /// Executable of the active game profile.
+    active_exe: Option<String>,
+    profile_check: Instant,
     status: SharedStatus,
     notify: Notifier,
     pipeline: Option<Pipeline>,
@@ -123,7 +131,8 @@ struct Engine {
 
 impl Engine {
     fn new(config: Config, status: SharedStatus, notify: Notifier) -> Self {
-        Engine { config, status, notify, pipeline: None, recording: false, retry_at: None }
+        let base = config.clone();
+        Engine { config, base, active_exe: None, profile_check: Instant::now() - Duration::from_secs(10), status, notify, pipeline: None, recording: false, retry_at: None }
     }
 
     fn run(mut self, rx: Receiver<Command>) {
@@ -147,8 +156,9 @@ impl Engine {
                 }
                 Ok(Command::ToggleRecording) => self.toggle_recording(),
                 Ok(Command::ToggleReplay) => {
-                    self.config.replay_enabled = !self.config.replay_enabled;
-                    self.config.save();
+                    self.base.replay_enabled = !self.base.replay_enabled;
+                    self.config.replay_enabled = self.base.replay_enabled;
+                    self.base.save();
                     let on = self.config.replay_enabled;
                     self.sync_pipeline();
                     (self.notify)(Notice {
@@ -167,6 +177,7 @@ impl Engine {
                 Err(_) => break,
             }
             self.watchdog();
+            self.check_profile();
         }
         unsafe { RoUninitialize() };
     }
@@ -255,17 +266,68 @@ impl Engine {
     }
 
     fn apply_config(&mut self, c: Config) {
+        self.base = c;
+        self.use_effective_config();
+    }
+
+    /// The settings in force: the general ones, or with the active game profile on top.
+    fn effective(&self) -> Config {
+        match self.active_exe.as_ref().and_then(|e| self.base.profiles.iter().find(|p| p.exe.eq_ignore_ascii_case(e))) {
+            Some(p) => self.base.with_profile(p),
+            None => self.base.clone(),
+        }
+    }
+
+    fn use_effective_config(&mut self) {
+        // A profile that was deleted in the settings stops being active.
+        if let Some(e) = &self.active_exe {
+            if !self.base.profiles.iter().any(|p| p.exe.eq_ignore_ascii_case(e)) {
+                self.active_exe = None;
+            }
+        }
+        let c = self.effective();
         let hot_changed = c.replay_seconds != self.config.replay_seconds || c.replay_enabled != self.config.replay_enabled;
         if let Some(p) = &self.pipeline {
             let mut v = p.volumes.lock();
             *v = (if c.system_audio { c.system_volume } else { 0.0 }, if c.mic_enabled { c.mic_volume } else { 0.0 });
         }
         self.config = c;
+        self.status.write().active_profile = self.active_exe.as_ref().and_then(|e| {
+            self.base.profiles.iter().find(|p| p.exe.eq_ignore_ascii_case(e)).map(|p| if p.name.is_empty() { p.exe.clone() } else { p.name.clone() })
+        });
         if hot_changed {
             self.sync_pipeline();
         }
         // Pipeline-affecting changes are handled by the watchdog (deferred while recording).
         self.watchdog();
+    }
+
+    /// Switches to a game profile while its game has a window and back when it is gone. Never
+    /// during a recording: the capture source must not change under it.
+    fn check_profile(&mut self) {
+        if self.recording || self.profile_check.elapsed() < Duration::from_secs(2) {
+            return;
+        }
+        if self.base.profiles.is_empty() && self.active_exe.is_none() {
+            return;
+        }
+        self.profile_check = Instant::now();
+        let exes: Vec<String> = sources::windows().into_iter().map(|w| w.exe).collect();
+        // The active game keeps the profile as long as it runs.
+        let keep = self.active_exe.as_ref().filter(|a| exes.iter().any(|e| e.eq_ignore_ascii_case(a))).cloned();
+        let want = keep.or_else(|| crate::config::find_profile(&self.base.profiles, &exes).map(|i| self.base.profiles[i].exe.clone()));
+        if want == self.active_exe {
+            return;
+        }
+        self.active_exe = want;
+        self.use_effective_config();
+        if let Some(name) = self.status.read().active_profile.clone() {
+            (self.notify)(Notice {
+                kind: NoticeKind::ReplayOn,
+                title: trf!(["Профиль игры: {}", "Game profile: {}", "Профіль гри: {}"], name),
+                detail: trf!(["Буфер {}", "Buffer {}", "Буфер {}"], util::format_duration(self.config.replay_seconds as f64)),
+            });
+        }
     }
 
     fn output_path(&self, kind: &str) -> PathBuf {
@@ -616,7 +678,7 @@ fn video_thread(
     let enc = loop {
         let (w, h) = fit_codec_limits(codec, out);
         settings.codec = codec;
-        settings.bitrate_mbps = if cfg.auto_bitrate { crate::config::auto_bitrate_mbps(codec, w, h, cfg.fps) } else { cfg.bitrate_mbps };
+        settings.bitrate_mbps = if cfg.auto_bitrate { crate::config::auto_bitrate_mbps(codec, w, h, cfg.fps, cfg.bitrate_quality) } else { cfg.bitrate_mbps };
         settings.width = w;
         settings.height = h;
         match VideoEncoder::new(&gpu, &settings) {

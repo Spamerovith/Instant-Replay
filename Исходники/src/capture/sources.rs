@@ -1,13 +1,15 @@
 //! Enumeration of capturable monitors and windows.
 
+use std::collections::HashMap;
+
 use windows::Win32::Foundation::{CloseHandle, BOOL, HWND, LPARAM, RECT, TRUE};
+use windows::Win32::System::Diagnostics::ToolHelp::{
+    CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
+};
 use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_CLOAKED};
 use windows::Win32::Graphics::Gdi::{
     EnumDisplayDevicesW, EnumDisplayMonitors, GetMonitorInfoW, DISPLAY_DEVICEW, HDC,
     HMONITOR, MONITORINFO, MONITORINFOEXW,
-};
-use windows::Win32::System::Threading::{
-    OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
 };
 use windows::Win32::UI::WindowsAndMessaging::*;
 
@@ -68,21 +70,21 @@ pub fn monitors() -> Vec<MonitorInfo> {
     list
 }
 
-fn exe_of(hwnd: HWND) -> String {
+/// Executable names of all processes by id, from one system snapshot. No handle to any process
+/// is opened (not even a read-only one), so games guarded by an anti-cheat are never touched.
+fn process_names() -> HashMap<u32, String> {
+    let mut map = HashMap::new();
     unsafe {
-        let mut pid = 0u32;
-        GetWindowThreadProcessId(hwnd, Some(&mut pid));
-        let Ok(h) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else { return String::new() };
-        let mut buf = [0u16; 520];
-        let mut len = buf.len() as u32;
-        let ok = QueryFullProcessImageNameW(h, PROCESS_NAME_WIN32, windows::core::PWSTR(buf.as_mut_ptr()), &mut len).is_ok();
-        let _ = CloseHandle(h);
-        if !ok {
-            return String::new();
+        let Ok(snap) = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) else { return map };
+        let mut e = PROCESSENTRY32W { dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32, ..Default::default() };
+        let mut ok = Process32FirstW(snap, &mut e).is_ok();
+        while ok {
+            map.insert(e.th32ProcessID, from_wide(&e.szExeFile));
+            ok = Process32NextW(snap, &mut e).is_ok();
         }
-        let full = String::from_utf16_lossy(&buf[..len as usize]);
-        full.rsplit('\\').next().unwrap_or("").to_string()
+        let _ = CloseHandle(snap);
     }
+    map
 }
 
 pub fn windows() -> Vec<WindowInfo> {
@@ -95,6 +97,7 @@ pub fn windows() -> Vec<WindowInfo> {
     unsafe {
         let _ = EnumWindows(Some(cb), LPARAM(&mut hwnds as *mut _ as isize));
     }
+    let names = process_names();
     let own_pid = std::process::id();
     let mut out = Vec::new();
     for h in hwnds {
@@ -126,7 +129,7 @@ pub fn windows() -> Vec<WindowInfo> {
             if pid == own_pid {
                 continue;
             }
-            let exe = exe_of(h);
+            let exe = names.get(&pid).cloned().unwrap_or_default();
             if exe.eq_ignore_ascii_case("explorer.exe") && title == "Program Manager" {
                 continue;
             }

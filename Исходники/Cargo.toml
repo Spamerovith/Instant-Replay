@@ -1,6 +1,6 @@
 ﻿[package]
 name = "instant-replay"
-version = "1.6.0"
+version = "1.7.0"
 edition = "2021"
 description = "Instant Replay and screen recorder for Windows (WGC + Media Foundation GPU encoding)"
 build = "build.rs"
@@ -58,6 +58,7 @@ features = [
     "Win32_System_Registry",
     "Win32_System_SystemInformation",
     "Win32_System_SystemServices",
+    "Win32_System_Diagnostics_ToolHelp",
     "Win32_System_Threading",
     "Win32_System_Variant",
     "Win32_System_WinRT",

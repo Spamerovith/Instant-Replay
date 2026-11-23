@@ -240,15 +240,17 @@ enum Page {
     Home,
     Video,
     Audio,
+    Games,
     Hotkeys,
     General,
 }
 
-fn pages() -> [(Page, &'static str, &'static str); 5] {
+fn pages() -> [(Page, &'static str, &'static str); 6] {
     [
     (Page::Home, glyph::HOME, tr!("Главная", "Home", "Головна")),
     (Page::Video, glyph::VIDEO, tr!("Видео", "Video", "Відео")),
     (Page::Audio, glyph::VOLUME, tr!("Звук", "Audio", "Звук")),
+    (Page::Games, glyph::GAME, tr!("Игры", "Games", "Ігри")),
     (Page::Hotkeys, glyph::KEYBOARD, tr!("Горячие клавиши", "Hotkeys", "Гарячі клавіші")),
     (Page::General, glyph::SETTINGS, tr!("Общие", "General", "Загальні")),
     ]
@@ -288,6 +290,9 @@ pub struct App {
     /// Newest clips on disk for the overlay gallery (all time).
     overlay_clips: Vec<crate::engine::ClipInfo>,
     overlay_clips_at: Option<Instant>,
+    /// Clip waiting for the delete confirmation, and the error of the last attempt.
+    delete_pending: Option<std::path::PathBuf>,
+    delete_error: Option<String>,
     update: Option<Arc<parking_lot::Mutex<Option<crate::update::Release>>>>,
     update_done: Arc<AtomicBool>,
     update_at: Instant,
@@ -332,6 +337,8 @@ impl App {
             viewer_prefs: ViewerPrefs::default(),
             overlay_clips: Vec::new(),
             overlay_clips_at: None,
+            delete_pending: None,
+            delete_error: None,
             update: None,
             update_done: Arc::new(AtomicBool::new(false)),
             update_at: Instant::now() - Duration::from_secs(48 * 3600),
@@ -440,6 +447,7 @@ impl eframe::App for App {
                 self.exit_overlay(ctx, false);
             }
         }
+        self.delete_dialog(ctx);
         if self.overlay.is_some() {
             self.overlay_ui(ctx, &status);
             self.sync_config(ctx);
@@ -490,6 +498,7 @@ impl eframe::App for App {
                             Page::Home => self.page_home(ui, &status),
                             Page::Video => self.page_video(ui, &status),
                             Page::Audio => self.page_audio(ui),
+                            Page::Games => self.page_games(ui, &status),
                             Page::Hotkeys => self.page_hotkeys(ui),
                             Page::General => self.page_general(ui, &status),
                         }
@@ -643,7 +652,7 @@ impl App {
         if self.page != p {
             self.page = p;
             self.page_changed = Instant::now();
-            if p == Page::Home || p == Page::Audio {
+            if p == Page::Home || p == Page::Audio || p == Page::Games {
                 self.refresh_sources();
             }
         }
@@ -780,6 +789,10 @@ impl App {
         } else {
             None
         };
+        if let Some(name) = &st.active_profile {
+            caption(ui, &trf!(["Профиль игры «{}»: записывается окно игры", "Game profile \"{}\": the game window is recorded", "Профіль гри «{}»: записується вікно гри"], name));
+            ui.add_space(space::S8);
+        }
         w::group(ui, Some(tr!("Источник", "Source", "Джерело")), |g| {
             g.row(tr!("Что записывать", "What to record", "Що записувати"), info.as_deref(), |ui| {
                 if w::icon_button(ui, glyph::REFRESH, tr!("Обновить список", "Refresh list", "Оновити список")).clicked() {
@@ -808,6 +821,7 @@ impl App {
         });
         ui.add_space(space::S8 - ui.spacing().item_spacing.y);
         let mut open_clip: Option<std::path::PathBuf> = None;
+        let mut delete_req: Option<std::path::PathBuf> = None;
         w::group(ui, None, |g| {
             if st.recent.is_empty() {
                 g.row(tr!("Пока пусто", "Nothing yet", "Поки порожньо"), None, |ui| {
@@ -833,9 +847,18 @@ impl App {
                     if resp.clicked() {
                         open_clip = Some(path.clone());
                     }
+                    resp.context_menu(|ui| {
+                        if clip_menu(ui) {
+                            delete_req = Some(path.clone());
+                        }
+                    });
                 });
             }
         });
+        if delete_req.is_some() {
+            self.delete_pending = delete_req;
+            self.delete_error = None;
+        }
         if let Some(p) = open_clip {
             self.open_clip(ui.ctx(), &p);
         }
@@ -960,7 +983,7 @@ impl App {
                 });
             } else {
                 let (aw, ah) = picture_size(&self.cfg, st.out_size);
-                let auto = crate::config::auto_bitrate_mbps(self.cfg.codec, aw, ah, self.cfg.fps);
+                let auto = crate::config::auto_bitrate_mbps(self.cfg.codec, aw, ah, self.cfg.fps, self.cfg.bitrate_quality);
                 g.row(
                     tr!("Автобитрейт", "Auto bitrate", "Автобітрейт"),
                     Some(tr!("Подбирается под разрешение, частоту кадров и кодек: файлы легче при той же чёткости", "Matched to resolution, frame rate and codec: lighter files at the same sharpness", "Добирається під роздільність, частоту кадрів і кодек: файли легші за тієї ж чіткості")),
@@ -971,6 +994,19 @@ impl App {
                         w::switch(ui, &mut self.cfg.auto_bitrate, tr!("Автобитрейт", "Auto bitrate", "Автобітрейт"));
                     },
                 );
+                if self.cfg.auto_bitrate {
+                    g.row(
+                        tr!("Качество", "Quality", "Якість"),
+                        Some(tr!("Компактно - файлы легче, Высокое - чётче в динамичных сценах", "Compact - lighter files, High - sharper in busy scenes", "Компактно - файли легші, Високе - чіткіше в динамічних сценах")),
+                        |ui| {
+                            let opts: Vec<(&str, bool)> = crate::config::BitrateQuality::ALL.iter().map(|q| (q.label(), true)).collect();
+                            let mut sel = crate::config::BitrateQuality::ALL.iter().position(|q| *q == self.cfg.bitrate_quality).unwrap_or(1);
+                            if w::segmented(ui, "bitrate-quality", &opts, &mut sel) {
+                                self.cfg.bitrate_quality = crate::config::BitrateQuality::ALL[sel];
+                            }
+                        },
+                    );
+                }
                 if !self.cfg.auto_bitrate {
                     let hint = bitrate_hint(&self.cfg, st.out_size);
                     g.row(tr!("Битрейт", "Bitrate", "Бітрейт"), Some(&hint), |ui| {
@@ -1325,7 +1361,7 @@ fn page_title(ui: &mut Ui, t: &str) {
 }
 
 fn caption(ui: &mut Ui, t: &str) {
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         ui.add_space(space::S4);
         ui.label(RichText::new(t).font(theme::caption()).color(color::TEXT_SECONDARY));
     });
@@ -1357,7 +1393,7 @@ fn bitrate_hint(cfg: &Config, out: (u32, u32)) -> String {
 
 fn estimate_memory(cfg: &Config, out: (u32, u32)) -> String {
     let (pw, ph) = picture_size(cfg, out);
-    let rate = if cfg.auto_bitrate { crate::config::auto_bitrate_mbps(cfg.codec, pw, ph, cfg.fps) } else { cfg.bitrate_mbps };
+    let rate = if cfg.auto_bitrate { crate::config::auto_bitrate_mbps(cfg.codec, pw, ph, cfg.fps, cfg.bitrate_quality) } else { cfg.bitrate_mbps };
     let mbps = if cfg.rate_control == RateControl::Cqp { rate.max(40) as f64 } else { rate as f64 * if cfg.rate_control == RateControl::Vbr { 1.1 } else { 1.0 } };
     let bytes = (mbps * 1_000_000.0 / 8.0 + 3.0 * 24_000.0) * cfg.replay_seconds as f64;
     let prefix = if cfg.rate_control == RateControl::Cqp { tr!("до ≈", "up to ≈", "до ≈") } else { "≈" };
@@ -1425,13 +1461,24 @@ impl App {
                 let avail = ui.available_width();
                 let tile_w = ((avail - space::S8 * 2.0) / 3.0).floor();
                 let mut picked: Option<std::path::PathBuf> = None;
+                let mut delete_req: Option<std::path::PathBuf> = None;
                 ui.horizontal(|ui| {
                     for clip in self.overlay_clips.iter() {
-                        if gallery_tile(ui, clip, tile_w).clicked() {
+                        let resp = gallery_tile(ui, clip, tile_w);
+                        if resp.clicked() {
                             picked = Some(clip.path.clone());
                         }
+                        resp.context_menu(|ui| {
+                            if clip_menu(ui) {
+                                delete_req = Some(clip.path.clone());
+                            }
+                        });
                     }
                 });
+                if delete_req.is_some() {
+                    self.delete_pending = delete_req;
+                    self.delete_error = None;
+                }
                 if let Some(p) = picked {
                     self.exit_overlay(ctx, true);
                     self.open_clip(ctx, &p);
@@ -1557,5 +1604,188 @@ fn picture_size(cfg: &Config, out: (u32, u32)) -> (u32, u32) {
         out
     } else {
         (1920, 1080)
+    }
+}
+
+/// Right-click menu of a clip; true when "Delete" was chosen.
+fn clip_menu(ui: &mut Ui) -> bool {
+    let mut chosen = false;
+    ui.set_min_width(140.0);
+    if ui.add(egui::Button::new(RichText::new(tr!("Удалить", "Delete", "Видалити")).font(theme::subhead()).color(color::RECORD)).frame(false)).clicked() {
+        chosen = true;
+        ui.close_menu();
+    }
+    chosen
+}
+
+impl App {
+    /// Confirmation before a clip goes to the Recycle Bin (opened by the right-click menu).
+    fn delete_dialog(&mut self, ctx: &egui::Context) {
+        let Some(path) = self.delete_pending.clone() else { return };
+        let mut confirm = false;
+        let mut cancel = ctx.input(|i| i.key_pressed(egui::Key::Escape));
+        let screen = ctx.screen_rect();
+        egui::Area::new(egui::Id::new("delete_modal")).order(egui::Order::Foreground).fixed_pos(screen.min).show(ctx, |ui| {
+            let (_, scrim) = ui.allocate_exact_size(screen.size(), egui::Sense::click());
+            ui.painter().rect_filled(screen, Rounding::ZERO, Color32::from_black_alpha(170));
+            if scrim.clicked() {
+                cancel = true;
+            }
+            let w = (screen.width() - space::S24 * 2.0).clamp(260.0, 380.0);
+            let card = egui::Rect::from_center_size(screen.center(), vec2(w, 200.0));
+            ui.allocate_new_ui(egui::UiBuilder::new().max_rect(card), |ui| {
+                egui::Frame::none().fill(color::SURFACE).rounding(Rounding::same(radius::CARD)).inner_margin(egui::Margin::same(space::S20)).show(ui, |ui| {
+                    ui.set_width(w - space::S20 * 2.0);
+                    ui.label(RichText::new(tr!("Удалить клип?", "Delete this clip?", "Видалити кліп?")).font(theme::title()).color(color::TEXT));
+                    ui.add_space(space::S8);
+                    let name = path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+                    ui.add(egui::Label::new(RichText::new(name).font(theme::body()).color(color::TEXT_SECONDARY)).truncate());
+                    ui.add_space(space::S4);
+                    let note = match &self.delete_error {
+                        Some(e) => trf!(["Не удалось удалить: {}", "Could not delete: {}", "Не вдалося видалити: {}"], e),
+                        None => tr!("Файл будет перемещён в Корзину", "The file will be moved to the Recycle Bin", "Файл буде переміщено до Кошика").to_string(),
+                    };
+                    ui.label(RichText::new(note).font(theme::subhead()).color(if self.delete_error.is_some() { color::RECORD } else { color::TEXT_SECONDARY }));
+                    ui.add_space(space::S16);
+                    ui.horizontal(|ui| {
+                        if w::pill_button(ui, tr!("Удалить", "Delete", "Видалити"), Kind::Record, size::BUTTON_MD, true).clicked() {
+                            confirm = true;
+                        }
+                        if w::pill_button(ui, tr!("Отмена", "Cancel", "Скасувати"), Kind::Ghost, size::BUTTON_MD, true).clicked() {
+                            cancel = true;
+                        }
+                    });
+                });
+            });
+        });
+        if confirm {
+            match crate::recycle::recycle(&path) {
+                Ok(()) => {
+                    self.engine.status.write().recent.retain(|c| c.path != path);
+                    self.overlay_clips.retain(|c| c.path != path);
+                    self.overlay_clips_at = None;
+                    self.delete_pending = None;
+                    self.delete_error = None;
+                }
+                Err(e) => {
+                    log::error!("delete {}: {e}", path.display());
+                    self.delete_error = Some(e);
+                }
+            }
+        } else if cancel {
+            self.delete_pending = None;
+            self.delete_error = None;
+        }
+    }
+}
+
+// ------------------------------------------------------------------ game profiles
+
+impl App {
+    fn page_games(&mut self, ui: &mut Ui, st: &Status) {
+        page_title(ui, tr!("Игры", "Games", "Ігри"));
+        caption(ui, tr!(
+            "Пока игра запущена, записывается её окно, а настройки ниже заменяют общие. Когда игра закрыта, всё возвращается как было",
+            "While a game runs, its window is recorded and the settings below replace the general ones. When it closes, everything goes back",
+            "Поки гра запущена, записується її вікно, а налаштування нижче замінюють загальні. Коли гру закрито, все повертається як було"
+        ));
+        ui.add_space(space::S12);
+
+        // Add a game from the running windows.
+        let mut candidates: Vec<(String, String)> = Vec::new();
+        for win in &self.windows {
+            let known = self.cfg.profiles.iter().any(|p| p.exe.eq_ignore_ascii_case(&win.exe)) || candidates.iter().any(|(e, _)| e.eq_ignore_ascii_case(&win.exe));
+            if !win.exe.is_empty() && !known {
+                candidates.push((win.exe.clone(), win.title.clone()));
+            }
+        }
+        let mut add: Option<(String, String)> = None;
+        let mut refresh = false;
+        w::group(ui, Some(tr!("Добавить игру", "Add a game", "Додати гру")), |g| {
+            g.row(
+                tr!("Запущенная программа", "Running program", "Запущена програма"),
+                Some(tr!("Запустите игру и выберите её из списка", "Start the game and pick it from the list", "Запустіть гру та виберіть її зі списку")),
+                |ui| {
+                    if w::icon_button(ui, glyph::REFRESH, tr!("Обновить список", "Refresh list", "Оновити список")).clicked() {
+                        refresh = true;
+                    }
+                    egui::ComboBox::from_id_salt("game-add")
+                        .width(220.0)
+                        .selected_text(RichText::new(tr!("Выбрать…", "Choose…", "Вибрати…")).font(theme::subhead()))
+                        .show_ui(ui, |ui| {
+                            for (exe, title) in &candidates {
+                                let label = format!("{}  ·  {}", exe, title);
+                                if ui.selectable_label(false, label).clicked() {
+                                    add = Some((exe.clone(), exe.trim_end_matches(".exe").trim_end_matches(".EXE").to_string()));
+                                }
+                            }
+                        });
+                },
+            );
+        });
+        if refresh {
+            self.refresh_sources();
+        }
+        if let Some((exe, name)) = add {
+            self.cfg.profiles.push(crate::config::GameProfile::from_config(&exe, &name, &self.cfg));
+        }
+
+        let mut remove: Option<usize> = None;
+        for i in 0..self.cfg.profiles.len() {
+            ui.add_space(space::S24);
+            let active = st.active_profile.as_deref().map_or(false, |a| {
+                let p = &self.cfg.profiles[i];
+                a == if p.name.is_empty() { p.exe.as_str() } else { p.name.as_str() }
+            });
+            let title = {
+                let p = &self.cfg.profiles[i];
+                let base = if p.name.is_empty() { p.exe.clone() } else { p.name.clone() };
+                if active { format!("{base}  ·  {}", tr!("сейчас активна", "active now", "зараз активна")) } else { base }
+            };
+            let p = &mut self.cfg.profiles[i];
+            w::group(ui, Some(&title), |g| {
+                g.row(tr!("Программа", "Program", "Програма"), None, |ui| {
+                    if w::pill_button(ui, tr!("Удалить", "Remove", "Видалити"), Kind::Ghost, size::BUTTON_SM, true).clicked() {
+                        remove = Some(i);
+                    }
+                    w::value_text(ui, &p.exe);
+                });
+                g.row(tr!("Частота кадров", "Frame rate", "Частота кадрів"), None, |ui| {
+                    let labels: Vec<String> = FPS_STEPS.iter().map(|f| f.to_string()).collect();
+                    let opts: Vec<(&str, bool)> = labels.iter().map(|s| (s.as_str(), true)).collect();
+                    let mut sel = FPS_STEPS.iter().position(|&f| f == p.fps).unwrap_or(1);
+                    if w::segmented(ui, &format!("game-fps-{i}"), &opts, &mut sel) {
+                        p.fps = FPS_STEPS[sel];
+                    }
+                });
+                g.row(tr!("Разрешение", "Resolution", "Роздільність"), None, |ui| {
+                    egui::ComboBox::from_id_salt(("game-res", i)).width(180.0).selected_text(RichText::new(p.resolution.label()).font(theme::subhead())).show_ui(ui, |ui| {
+                        for r in Resolution::ALL {
+                            if ui.selectable_label(p.resolution == r, r.label()).clicked() {
+                                p.resolution = r;
+                            }
+                        }
+                    });
+                });
+                g.row(tr!("Качество", "Quality", "Якість"), None, |ui| {
+                    let opts: Vec<(&str, bool)> = crate::config::BitrateQuality::ALL.iter().map(|q| (q.label(), true)).collect();
+                    let mut sel = crate::config::BitrateQuality::ALL.iter().position(|q| *q == p.quality).unwrap_or(1);
+                    if w::segmented(ui, &format!("game-q-{i}"), &opts, &mut sel) {
+                        p.quality = crate::config::BitrateQuality::ALL[sel];
+                    }
+                });
+                g.row(tr!("Длительность буфера", "Buffer length", "Тривалість буфера"), None, |ui| {
+                    let idx = REPLAY_STEPS.iter().position(|&s| s >= p.replay_seconds).unwrap_or(REPLAY_STEPS.len() - 1);
+                    let mut fidx = idx as f32;
+                    w::value_text(ui, &util::format_duration(p.replay_seconds as f64));
+                    if w::slider(ui, &format!("game-len-{i}"), &mut fidx, 0.0, (REPLAY_STEPS.len() - 1) as f32, 1.0, 180.0).changed() {
+                        p.replay_seconds = REPLAY_STEPS[fidx.round() as usize];
+                    }
+                });
+            });
+        }
+        if let Some(i) = remove {
+            self.cfg.profiles.remove(i);
+        }
     }
 }

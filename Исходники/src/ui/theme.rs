@@ -130,6 +130,7 @@ pub mod glyph {
     pub const CHECK: &str = "\u{E73E}";
     pub const MONITOR: &str = "\u{E7F4}";
     pub const WINDOW: &str = "\u{E737}";
+    pub const GAME: &str = "\u{E7FC}";
     pub const MIC: &str = "\u{E720}";
     pub const FILM: &str = "\u{E8B2}";
     pub const CLOSE: &str = "\u{E711}";

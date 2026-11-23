@@ -15,6 +15,7 @@ mod icon;
 mod media;
 mod overlay;
 mod player;
+mod recycle;
 mod replay;
 mod sound;
 mod tools;
@@ -295,6 +296,13 @@ fn selftest(dir: String, codec: Option<String>) {
             _ => config::RateControl::Vbr,
         };
     }
+    if let Some(i) = args.iter().position(|a| a == "--profile") {
+        let exe = args.get(i + 1).cloned().unwrap_or_default();
+        let mut p = config::GameProfile::from_config(&exe, "TestGame", &cfg);
+        p.fps = 30;
+        p.resolution = config::Resolution::P720;
+        cfg.profiles.push(p);
+    }
     let notifier: engine::Notifier = Arc::new(|n: Notice| log::info!("NOTICE {:?}: {} | {}", n.kind, n.title, n.detail));
     let e = engine::start(cfg, notifier);
     std::thread::sleep(Duration::from_secs(8));
@@ -302,7 +310,7 @@ fn selftest(dir: String, codec: Option<String>) {
     std::thread::sleep(Duration::from_millis(1500));
     {
         let s = e.status.read();
-        log::info!("STATUS running={} buffered={:.1}s bytes={} enc='{}' out={:?} dropped={} err={:?}", s.running, s.buffered_secs, s.buffer_bytes, s.encoder_name, s.out_size, s.dropped_frames, s.error);
+        log::info!("STATUS running={} buffered={:.1}s bytes={} enc='{}' out={:?} dropped={} err={:?} profile={:?}", s.running, s.buffered_secs, s.buffer_bytes, s.encoder_name, s.out_size, s.dropped_frames, s.error, s.active_profile);
     }
     e.send(Command::SaveReplay);
     std::thread::sleep(Duration::from_secs(2));
